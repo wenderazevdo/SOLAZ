@@ -8,14 +8,50 @@ dados em nuvem (PostgreSQL/MySQL) bastando trocar esta camada.
 """
 import os
 import sqlite3
+import sys
 from contextlib import contextmanager
 
 from config import DB_PATH
 
-_SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.sql")
+
+
+def resource_path(relative_path: str) -> str:
+    """Caminho de um arquivo ESTÁTICO empacotado com o app (somente leitura).
+
+    * Executável do PyInstaller: usa sys._MEIPASS (pasta onde o PyInstaller
+      extrai/guarda os arquivos incluídos com --add-data; em builds onedir
+      recentes é dist/<App>/_internal).
+    * Desenvolvimento (python main.py): usa a raiz do projeto.
+
+    Use para schema.sql, assets, fontes etc. NÃO use para dados gravados
+    pelo usuário (banco, logos, assinaturas, PDFs) — esses ficam em
+    config.DATA_DIR / DB_PATH."""
+    base = getattr(sys, "_MEIPASS", None)
+    if not base:
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *relative_path.replace("\\", "/").split("/"))
+
+
+def _resolver_schema() -> str:
+    candidatos = [
+        resource_path("database/schema.sql"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql"),
+        os.path.join(os.path.dirname(sys.executable), "database", "schema.sql"),
+    ]
+    for caminho in candidatos:
+        if os.path.isfile(caminho):
+            return caminho
+    return candidatos[0]
+
+
+_SCHEMA_PATH = _resolver_schema()
 
 
 def get_connection() -> sqlite3.Connection:
+    # Garante que a pasta do banco exista antes de conectar.
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -37,6 +73,12 @@ def get_cursor(commit: bool = False):
 
 def init_db():
     """Cria as tabelas do sistema caso ainda não existam."""
+    if not os.path.isfile(_SCHEMA_PATH):
+        raise FileNotFoundError(
+            f"schema.sql não encontrado em: {_SCHEMA_PATH}\n"
+            "Ao compilar com o PyInstaller, inclua o arquivo com:\n"
+            '  --add-data "database/schema.sql;database"'
+        )
     with open(_SCHEMA_PATH, "r", encoding="utf-8") as f:
         schema_sql = f.read()
     conn = get_connection()
