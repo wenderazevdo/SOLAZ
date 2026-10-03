@@ -1,0 +1,42 @@
+# ============================================================
+# Solaz App — Python / CustomTkinter
+# ============================================================
+
+# --- 1. Temporários do Python ------------------------------
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# --- 2. Banco de dados local, dados do usuário e credenciais
+*.db
+*.sqlite3
+.env
+# Criados em tempo de execução (config.py recria as pastas sozinho):
+# banco, logos, assinaturas e fotos dos clientes.
+data/
+
+# --- 3. Compilação / executável (PyInstaller) --------------
+build/
+dist/
+*.spec
+
+# --- 4. Mídias e PDFs gerados em testes --------------------
+*.pdf
+
+# Imagens: só na raiz do projeto e em pastas de testes locais
+# (assets/ continua versionado: logo_solaz.png e login_bg.png são do app)
+/*.jpg
+/*.jpeg
+/*.png
+/tests/**/*.jpg
+/tests/**/*.jpeg
+/tests/**/*.png
+/testes/**/*.jpg
+/testes/**/*.jpeg
+/testes/**/*.png
+
+# --- 5. Arquivos de diagnóstico ----------------------------
+telegram_log.txt
+estrutura.txt
+ignorados.txt
