@@ -50,7 +50,7 @@ COLOR_THEME = "blue"         # tema de cor do CustomTkinter (base do CTk)
 # ---------------------------------------------------------------------------
 APP_VERSION = "1.0.0"
 GITHUB_REPO_OWNER = "wenderazevdo"
-GITHUB_REPO_NAME = "Solaz-Relat-rios-"
+GITHUB_REPO_NAME = "SOLAZ"
 
 # ---------------------------------------------------------------------------
 # Telemetria via Telegram Bot API (alertas de novo cadastro e de uso em outro
