@@ -1,7 +1,6 @@
 """
-Envio de alertas via Telegram Bot API — novo cadastro pendente, tentativa de
-uso em outro PC (cópia) e aprovação/reprovação de relatórios por botões
-inline. Toda requisição roda em thread separada com timeout curto: se o PC
+Envio de alertas via Telegram Bot API — novo cadastro pendente (com botões
+Aprovar/Reprovar), tentativa de uso em outro PC (cópia). Toda requisição roda em thread separada com timeout curto: se o PC
 estiver offline ou o Telegram fora do ar, a interface NUNCA trava — a
 mensagem simplesmente não sai (falha silenciosa).
 """
@@ -14,22 +13,22 @@ import time
 import requests
 import telebot  # pip install pyTelegramBotAPI
 
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
-from models.relatorio_dao import (
-    RelatorioDAO, STATUS_REL_APROVADO, STATUS_REL_REPROVADO,
-)
+from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DATA_DIR
 from models.usuario_dao import UsuarioDAO, STATUS_APROVADO, STATUS_BLOQUEADO
 
 _log = logging.getLogger("telegram")
 _log.setLevel(logging.INFO)
 if not _log.handlers:
-    # Log em arquivo na raiz do projeto (funciona até sem terminal) + console.
+    # Log em arquivo na pasta de dados da aplicação (DATA_DIR) + console.
+    # Se a pasta não for gravável, segue só com o console (nunca derruba o app).
     _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    _arq = logging.FileHandler(
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                     "telegram_log.txt"), encoding="utf-8")
-    _arq.setFormatter(_fmt)
-    _log.addHandler(_arq)
+    try:
+        _arq = logging.FileHandler(os.path.join(DATA_DIR, "telegram_log.txt"),
+                                   encoding="utf-8")
+        _arq.setFormatter(_fmt)
+        _log.addHandler(_arq)
+    except OSError:
+        pass
     _con = logging.StreamHandler()
     _con.setFormatter(_fmt)
     _log.addHandler(_con)
@@ -37,12 +36,6 @@ _TIMEOUT_SEGUNDOS = 3
 _URL_ENVIO = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
-
-_ACOES = {
-    "aprovar": (STATUS_REL_APROVADO, "✅", "APROVADO"),
-    "reprovar": (STATUS_REL_REPROVADO, "❌", "REPROVADO"),
-}
-
 
 def _enviar_em_thread(texto: str, teclado: dict = None):
     _log.info("Enviando alerta: %s", texto.splitlines()[0])
@@ -127,67 +120,6 @@ def alertar_uso_em_outro_pc(usuario: str, nome_pc_original: str, nome_pc_atual: 
         f"• *Ação Tomada:* Acesso bloqueado automaticamente pelo sistema."
     )
     _enviar_em_thread(texto)
-
-
-# ------------------------------------------------ Aprovar / Reprovar --
-def notificar_relatorio_para_aprovacao(codigo: str, detalhes: str = ""):
-    """Envia o relatório ao Telegram com os botões Aprovar/Reprovar.
-    callback_data = '<acao>_<codigo>' (ex.: aprovar_RMP-20261003-001,
-    bem abaixo do limite de 64 bytes do Telegram)."""
-    _log.info("notificar_relatorio_para_aprovacao chamada: %s", codigo)
-    teclado = telebot.types.InlineKeyboardMarkup()
-    teclado.row(
-        telebot.types.InlineKeyboardButton("✅ Aprovar", callback_data=f"aprovar_{codigo}"),
-        telebot.types.InlineKeyboardButton("❌ Reprovar", callback_data=f"reprovar_{codigo}"),
-    )
-    texto = f"📄 Relatório {codigo} aguardando decisão"
-    if detalhes:
-        texto += f"\n{detalhes}"
-
-    def worker():
-        try:
-            msg = bot.send_message(TELEGRAM_CHAT_ID, texto, reply_markup=teclado)
-            _log.info("Relatório %s enviado (message_id=%s).", codigo, msg.message_id)
-        except Exception as e:
-            _log.error("Falha ao enviar relatório ao Telegram: %r", e)
-
-    threading.Thread(target=worker, daemon=True).start()
-
-
-@bot.callback_query_handler(
-    func=lambda c: bool(c.data) and c.data.startswith(("aprovar_", "reprovar_"))
-)
-def _callback_relatorio(call):
-    # 1) Primeira instrução: destrava o "piscando" do botão no Telegram.
-    bot.answer_callback_query(call.id, text="Processando...")
-    _log.info("Clique recebido: %s", call.data)
-
-    chat_id = call.message.chat.id
-    message_id = call.message.message_id
-    try:
-        # Só o chat autorizado pode decidir.
-        if str(chat_id) != str(TELEGRAM_CHAT_ID):
-            return
-
-        # 2) Identifica ação e código do relatório.
-        acao, codigo = call.data.split("_", 1)
-        status, icone, rotulo = _ACOES[acao]
-
-        # 3) Atualiza o status no banco.
-        if RelatorioDAO().atualizar_status(codigo, status):
-            texto = f"{icone} Relatório {codigo} {rotulo}"
-        else:
-            texto = f"⚠️ Relatório {codigo} não encontrado no banco de dados."
-
-        # 4) Edita a mensagem original (sem reply_markup => remove os botões).
-        bot.edit_message_text(texto, chat_id, message_id)
-    except Exception:
-        _log.exception("Erro ao processar clique %s", call.data)
-        try:
-            bot.edit_message_text("⚠️ Erro ao processar a solicitação. Tente novamente.",
-                                  chat_id, message_id)
-        except Exception:
-            pass
 
 
 _ACOES_CADASTRO = {

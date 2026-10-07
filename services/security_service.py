@@ -51,7 +51,7 @@ def get_win_user() -> str:
             return "desconhecido"
 
 
-def _executar(comando, timeout=8) -> str:
+def _executar(comando, timeout=2) -> str:
     try:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # sem janela de console
         r = subprocess.run(

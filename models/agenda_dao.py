@@ -3,6 +3,12 @@ from database.db import get_cursor
 
 
 class AgendaDAO:
+    # Colunas da tabela `agenda` que `atualizar()` aceita alterar.
+    CAMPOS_ATUALIZAVEIS = frozenset({
+        "data", "hora", "ordem_atendimento", "observacoes",
+        "descricao_servico", "valor_orcamento",
+    })
+
     def criar(self, cliente_id: int, data: str, hora: str,
               ordem_atendimento: int = 1, observacoes: str = "",
               descricao_servico: str = "", valor_orcamento: float = None):
@@ -36,6 +42,11 @@ class AgendaDAO:
     def atualizar(self, agenda_id: int, **campos):
         if not campos:
             return
+        invalidos = sorted(set(campos) - self.CAMPOS_ATUALIZAVEIS)
+        if invalidos:
+            raise ValueError(
+                f"Campos inválidos para atualizar a agenda: {', '.join(invalidos)}. "
+                f"Permitidos: {', '.join(sorted(self.CAMPOS_ATUALIZAVEIS))}.")
         set_clause = ", ".join([f"{k}=?" for k in campos])
         valores = list(campos.values()) + [agenda_id]
         with get_cursor(commit=True) as cur:

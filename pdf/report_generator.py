@@ -20,6 +20,7 @@ Opcional: `Montserrat-Bold.ttf` na mesma pasta para os títulos de seção.
 Ordem de busca: pasta do projeto -> fontes do sistema (Liberation, Arial).
 Sem nenhuma, cai para Helvetica sem quebrar.
 """
+import gc
 import os
 from functools import lru_cache
 from io import BytesIO
@@ -177,6 +178,12 @@ NOMES_SECOES = {
     "geracao_energia": "Comparativo de Geração de Energia (Antes e Depois)",
     "sugestoes_melhorias": "Sugestões de Melhorias",
     "tabela_conformidade": "Tabela de Conformidade String Box / Elétrica (CC e CA)",
+    # Relatório de Troca de Microinversor
+    "troca_etiquetas": "Etiquetas e Equipamentos (Micro Antigo e Novo)",
+    "troca_modulos": "Testes dos Módulos (Voc / Isc)",
+    "troca_cabo_tronco": "Medições no Cabo Tronco (Fase-Fase e Fase-Terra)",
+    "troca_sugestoes": "Sugestões de Melhoria",
+    "troca_ocorrencia": "Ocorrência Extra / Imprevistos",
 }
 
 
@@ -215,6 +222,14 @@ def _carregar_imagem(caminho):
         leitor = ImageReader(caminho)
         w, h = leitor.getSize()
         return leitor, w, h
+
+
+def limpar_cache_imagens():
+    """Esvazia o cache de fotos (cada ImageReader guarda a imagem em memória) e
+    força o coletor de lixo. Chamada ao fim de cada geração de PDF para a RAM
+    voltar ao nível de antes do relatório."""
+    _carregar_imagem.cache_clear()
+    gc.collect()
 
 
 # ================================================================== flowables
@@ -298,10 +313,13 @@ class _Pilula(Flowable):
 class _LinhaCards(Flowable):
     """Uma linha com 1 ou 2 cards de foto, sempre com a MESMA altura.
     Card = moldura arredondada, título colorido, divisória fina, foto 4:3
-    (recorte 'cover', cantos arredondados) e legenda."""
+    (recorte 'cover', cantos arredondados) e legenda.
+    Card solitário na linha (1 foto, ou a 3ª de um grupo de 3) é CENTRALIZADO
+    na página, mantendo a mesma largura dos cards de linhas com 2 fotos."""
     PAD = 8
     GAP = 10
     GAP_V = 10
+    CENTRALIZAR_SOLITARIO = True
 
     def __init__(self, itens):
         """itens: lista de (foto_dict, rotulo) onde rotulo = (texto, cor) | None"""
@@ -317,7 +335,7 @@ class _LinhaCards(Flowable):
         altura = 0
         for foto, rotulo in self.itens:
             txt = (foto.get("legenda") or "").strip()
-            par = Paragraph(txt, LEGENDA) if txt else None
+            par = Paragraph(_esc(txt), LEGENDA) if txt else None
             ph = par.wrap(self.iw, 200)[1] if par else 0
             self.legendas.append((par, ph))
             h = self.PAD + self.ih + self.PAD
@@ -337,8 +355,9 @@ class _LinhaCards(Flowable):
     def draw(self):
         c = self.canv
         H = self.altura_card
+        solitario = self.CENTRALIZAR_SOLITARIO and len(self.itens) == 1
         for i, (foto, rotulo) in enumerate(self.itens):
-            x0 = i * (self.cw + self.GAP)
+            x0 = ((self.width - self.cw) / 2) if solitario else i * (self.cw + self.GAP)
             c.setFillColor(colors.white)
             c.setStrokeColor(COR_BORDA_FINA)
             c.setLineWidth(0.6)
@@ -471,7 +490,8 @@ def _titulo_sem_numero(texto):
 
 
 def _formatar_responsavel(relatorio, empresa):
-    tecnico = (relatorio.get("responsavel_tecnico") or "").strip()
+    tecnico = (empresa.get("responsavel_tecnico")
+               or relatorio.get("responsavel_tecnico") or "").strip()
     registro = (empresa.get("responsavel_registro") or "").strip()
     if not registro:
         return tecnico or "—"
@@ -480,11 +500,11 @@ def _formatar_responsavel(relatorio, empresa):
     return f"{tecnico} (CRT: {registro})" if tecnico else f"CRT: {registro}"
 
 
-def _bloco_capa(empresa, cliente, relatorio):
+def _bloco_capa(empresa, cliente, relatorio, titulo=None, subtitulo=None):
     elementos = [
-        Paragraph("Relatório de Manutenção Preventiva (RMP)", CAPA_TITULO),
-        Paragraph("Inspeção Técnica, Limpeza de Módulos e Testes de Funcionalidade Elétrica",
-                  CAPA_SUB),
+        Paragraph(titulo or "Relatório de Manutenção Preventiva (RMP)", CAPA_TITULO),
+        Paragraph(subtitulo or "Inspeção Técnica, Limpeza de Módulos e Testes de "
+                  "Funcionalidade Elétrica", CAPA_SUB),
         Spacer(1, 0.4 * cm),
     ]
 
@@ -531,7 +551,7 @@ def _tabela_base(linhas, larguras, extra=None):
     return tabela
 
 
-def _bloco_sumario(secoes_ativas):
+def _bloco_sumario(secoes_ativas, nomes_extra=None):
     elementos = _titulo_sem_numero("Sumário do Relatório")
     linhas = [[Paragraph("ITEM", CAB_TABELA), Paragraph("SEÇÃO", CAB_TABELA)]]
     linhas.append([Paragraph("1.0", ITEM_TABELA),
@@ -539,7 +559,8 @@ def _bloco_sumario(secoes_ativas):
     n = 2
     for secao in secoes_ativas:
         linhas.append([Paragraph(f"{n}.0", ITEM_TABELA),
-                       Paragraph(NOMES_SECOES.get(secao, secao), CORPO_TABELA)])
+                       Paragraph((nomes_extra or {}).get(secao)
+                                 or NOMES_SECOES.get(secao, secao), CORPO_TABELA)])
         n += 1
     elementos.append(_tabela_base(linhas, [1.8 * cm, LARGURA_UTIL - 1.8 * cm]))
     elementos.append(Spacer(1, 0.5 * cm))
@@ -583,7 +604,7 @@ def _bloco_fotos(secao_chave, numero, fotos):
         cabecalho.append(Spacer(1, 0.4 * cm))
         return [KeepTogether(cabecalho)]
 
-    if secao_chave == "sugestoes_melhorias":
+    if secao_chave in ("sugestoes_melhorias", "troca_sugestoes"):
         com_foto = [f for f in fotos if f.get("foto_path")]
         sem_foto = [f for f in fotos if not f.get("foto_path")]
     else:
@@ -620,11 +641,12 @@ def _bloco_fotos(secao_chave, numero, fotos):
 
 # --------------------------------------------------------- conformidade -----
 def _bloco_tabela_conformidade(numero, strings_data, disjuntores_data=None):
-    cabecalho = _titulo_com_barra(numero, "Tabela de Conformidade Elétrica (CC e CA)")
-    cabecalho.append(Paragraph(
+    titulo = _titulo_com_barra(numero, "Tabela de Conformidade Elétrica (CC e CA)")
+    intro = [Paragraph(
         "Os testes de medição de tensão e isolamento/flutuação para cada String "
-        "resultaram nos seguintes parâmetros:", CORPO))
-    cabecalho.append(Spacer(1, 0.25 * cm))
+        "resultaram nos seguintes parâmetros:", CORPO),
+        Spacer(1, 0.25 * cm)]
+    cabecalho = titulo + intro
 
     disjuntores_data = disjuntores_data or []
     if not strings_data and not disjuntores_data:
@@ -637,12 +659,26 @@ def _bloco_tabela_conformidade(numero, strings_data, disjuntores_data=None):
     extra = []
     idx = 1
 
-    def linha_grupo(texto):
+    def linha_grupo(texto, destaque=False):
         nonlocal idx
         linhas.append([Paragraph(texto, GRUPO_TABELA), "", ""])
         extra.append(("SPAN", (0, idx), (-1, idx)))
-        extra.append(("BACKGROUND", (0, idx), (-1, idx), colors.HexColor("#F8FAFC")))
+        extra.append(("BACKGROUND", (0, idx), (-1, idx),
+                      COR_CAB_TABELA if destaque else colors.HexColor("#F8FAFC")))
         idx += 1
+
+    # Strings agrupadas por inversor (ordem de aparição). Sem `inversor_nome`
+    # (relatórios antigos) o grupo fica sem nome e a tabela sai como antes.
+    grupos, posicao = [], {}
+    for s in strings_data:
+        nome_inv = (s.get("inversor_nome") or "").strip() or None
+        if nome_inv not in posicao:
+            posicao[nome_inv] = len(grupos)
+            grupos.append({"nome": nome_inv, "foto": None, "strings": []})
+        grupo = grupos[posicao[nome_inv]]
+        if not grupo["foto"] and _foto_existe({"foto_path": s.get("inversor_foto_path")}):
+            grupo["foto"] = s["inversor_foto_path"]
+        grupo["strings"].append(s)
 
     def linha_param(nome, valor, unidade, status):
         nonlocal idx
@@ -650,24 +686,27 @@ def _bloco_tabela_conformidade(numero, strings_data, disjuntores_data=None):
             valor_txt, cel_status = "—", Paragraph("—", CORPO_TABELA)
         else:
             conforme = (status or "").upper() == "CONFORME"
-            valor_txt = f"{valor} {unidade}"
+            valor_txt = _fmt_medicao(valor, unidade)
             cel_status = _Pilula("CONFORME" if conforme else "NÃO CONFORME", conforme)
         linhas.append([Paragraph(nome, CORPO_TABELA), Paragraph(valor_txt, CORPO_TABELA),
                        cel_status])
         idx += 1
 
-    for s in strings_data:
-        nome = s.get("string_nome", "")
-        linha_grupo(nome.upper())
-        linha_param(f"Tensão de Operação ({nome})", s.get("tensao_vcc"), "Vcc",
-                    s.get("status_tensao") or s.get("status"))
-        linha_param("Teste Flutuação (+) / Terra", s.get("flutuacao_positivo"), "Vcc",
-                    s.get("status_flutuacao_positivo") or s.get("status"))
-        linha_param("Teste Flutuação (-) / Terra", s.get("flutuacao_negativo"), "Vcc",
-                    s.get("status_flutuacao_negativo") or s.get("status"))
-        if s.get("neutro_valor") is not None:
-            linha_param("Teste de Neutro", s.get("neutro_valor"), "Vcc",
-                        s.get("status_neutro") or s.get("status"))
+    for grupo in grupos:
+        if grupo["nome"]:
+            linha_grupo(f"{_esc(grupo['nome']).upper()} - MEDIÇÕES DE STRING", destaque=True)
+        for s in grupo["strings"]:
+            nome = s.get("string_nome", "")
+            linha_grupo(nome.upper())
+            linha_param(f"Tensão de Operação ({nome})", s.get("tensao_vcc"), "Vcc",
+                        s.get("status_tensao") or s.get("status"))
+            linha_param("Teste Flutuação (+) / Terra", s.get("flutuacao_positivo"), "Vcc",
+                        s.get("status_flutuacao_positivo") or s.get("status"))
+            linha_param("Teste Flutuação (-) / Terra", s.get("flutuacao_negativo"), "Vcc",
+                        s.get("status_flutuacao_negativo") or s.get("status"))
+            if s.get("neutro_valor") is not None:
+                linha_param("Teste de Neutro", s.get("neutro_valor"), "Vcc",
+                            s.get("status_neutro") or s.get("status"))
 
     if disjuntores_data:
         linha_grupo("CIRCUITO DE CORRENTE ALTERNADA (CA)")
@@ -687,6 +726,16 @@ def _bloco_tabela_conformidade(numero, strings_data, disjuntores_data=None):
 
     tabela = _tabela_base(linhas, [9 * cm, 4 * cm, 5 * cm], extra)
     tabela.repeatRows = 1
+
+    # PARTE SUPERIOR: fotos das etiquetas dos inversores (grid 2 por linha,
+    # título azul 'ETIQUETA DO INVERSOR 01'). Só entram inversores com foto.
+    cards = [({"foto_path": g["foto"], "legenda": ""},
+              (f"ETIQUETA DO {g['nome'].upper()}", COR_ACCENT))
+             for g in grupos if g["nome"] and g["foto"]]
+    if cards:
+        # PARTE INFERIOR: intro + tabela unificada logo abaixo das fotos.
+        return (_grupo_cards(titulo, cards)
+                + [KeepTogether(intro + [tabela]), Spacer(1, 0.4 * cm)])
     # Título + intro + tabela juntos (se couber numa página): evita grupo órfão.
     return [KeepTogether(cabecalho + [tabela]), Spacer(1, 0.4 * cm)]
 
@@ -744,7 +793,8 @@ def _bloco_assinatura(empresa, relatorio):
     linha.hAlign = "CENTER"
     conteudo.append(linha)
 
-    nome_tecnico = (relatorio.get("responsavel_tecnico") or "—").strip()
+    nome_tecnico = (empresa.get("responsavel_tecnico")
+                    or relatorio.get("responsavel_tecnico") or "—").strip()
     registro = (empresa.get("responsavel_registro") or "").strip()
     cargo = "Responsável Técnico"
     if registro:
@@ -777,19 +827,357 @@ def gerar_relatorio_pdf(caminho_pdf, empresa, cliente, relatorio,
         relatorio.get("data_servico"), empresa.get("nome", ""),
     )
 
+    # Ocorrências extras vêm em relatorio["ocorrencias_extras"]; cada uma vira
+    # uma seção numerada (e uma linha do sumário) com o título do usuário.
+    ocorrencias = _ocorrencias_extras_validas(relatorio.get("ocorrencias_extras"))
+    secoes_sumario, nomes_extra = [], {}
+    for secao in secoes_ativas:
+        if secao == "ocorrencias_extras":
+            for i, oc in enumerate(ocorrencias):
+                chave = f"ocorrencia_extra:{i}"
+                secoes_sumario.append(chave)
+                nomes_extra[chave] = _esc(oc["titulo"])
+        else:
+            secoes_sumario.append(secao)
+
     story = []
     story += _bloco_capa(empresa, cliente, relatorio)
-    story += _bloco_sumario(secoes_ativas)
+    story += _bloco_sumario(secoes_sumario, nomes_extra)
     story += _bloco_objetivo(relatorio)
 
     numero = 2
     for secao in secoes_ativas:
         if secao == "tabela_conformidade":
             story += _bloco_tabela_conformidade(numero, strings_data, disjuntores_data)
+        elif secao == "ocorrencias_extras":
+            if not ocorrencias:
+                continue                     # seção ativa mas vazia: não ocupa número
+            story += _bloco_ocorrencias_extras(numero, ocorrencias)
+            numero += len(ocorrencias) - 1   # +1 do fim do laço cobre a última
         else:
             story += _bloco_fotos(secao, numero, fotos_por_secao.get(secao, []))
         numero += 1
 
     story += _bloco_assinatura(empresa, relatorio)
-    doc.build(story, canvasmaker=NumberedCanvas)
+    try:
+        doc.build(story, canvasmaker=NumberedCanvas)
+    finally:
+        limpar_cache_imagens()
+    return caminho_pdf
+
+
+# ======================================================================
+#  RELATÓRIO DE TROCA DE MICROINVERSOR
+# ======================================================================
+from xml.sax.saxutils import escape as _esc
+
+ROTULO_ETIQUETA_ANTIGA = ("MICROINVERSOR COM AVARIA", COR_VERMELHO)
+ROTULO_ETIQUETA_NOVA = ("NOVO MICROINVERSOR", COR_VERDE)
+ROTULO_MICRO_NOVO = ("MICROINVERSOR NOVO INSTALADO", COR_VERDE)
+ROTULO_TESTE_TRONCO = ("TESTE DE TENSÃO CA - CABO TRONCO", COR_ACCENT)
+ROTULO_OCORRENCIA = ("REGISTRO DA OCORRÊNCIA", COR_VERMELHO)
+
+
+def _foto_existe(foto):
+    caminho = (foto or {}).get("foto_path")
+    return isinstance(caminho, str) and bool(caminho) and os.path.exists(caminho)
+
+
+def _fotos_validas(fotos):
+    """Só fotos com caminho preenchido E arquivo existente em disco."""
+    return [f for f in (fotos or []) if f and _foto_existe(f)]
+
+
+from math import isfinite as _isfinite
+
+
+def _fmt_medicao(valor, unidade):
+    """Valor já tratado para exibição: '38,2 V', '281 V'. Aceita int, float ou
+    texto numérico ('38,2', '38.2', '1.234,5'); texto não numérico é mostrado
+    como veio (escapado para o Paragraph); vazio/None/NaN/inf vira '—'."""
+    if valor is None:
+        return "—"
+    if isinstance(valor, str):
+        texto = " ".join(valor.split())  # normaliza espaços (inclusive \u00a0)
+        if not texto:
+            return "—"
+        limpo = texto.replace(" ", "")
+        if "," in limpo:  # vírgula é o decimal; pontos antes dela são milhar
+            limpo = limpo.replace(".", "").replace(",", ".")
+        try:
+            numero = float(limpo)
+        except ValueError:
+            return f"{_esc(texto)} {unidade}"
+    else:
+        try:
+            numero = float(valor)
+        except (TypeError, ValueError):
+            return "—"
+    if not _isfinite(numero):
+        return "—"
+    txt = f"{numero:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+    if txt == "-0":
+        txt = "0"
+    return f"{txt} {unidade}"
+
+
+def _grupo_cards(abertura, itens):
+    """Grid adaptativo de fotos (2 por linha). `itens` = [(foto, rotulo)].
+      1 foto  -> centralizada;
+      2 fotos -> lado a lado;
+      3 fotos -> 2 na 1ª linha + a 3ª centralizada na linha de baixo;
+      4 fotos -> grid 2x2 (5+ segue o mesmo padrão; sobra ímpar fica centralizada).
+    A centralização do card solitário é feita por _LinhaCards. A 1ª linha fica
+    junto da `abertura` (título/subtítulo) para o título nunca ficar órfão."""
+    if not itens:
+        return list(abertura)
+    linhas = [itens[i:i + 2] for i in range(0, len(itens), 2)]
+    saida = [KeepTogether(list(abertura) + [_LinhaCards(linhas[0]),
+                                            Spacer(1, _LinhaCards.GAP_V)])]
+    for linha in linhas[1:]:
+        saida += [_LinhaCards(linha), Spacer(1, _LinhaCards.GAP_V)]
+    return saida
+
+
+def _bloco_troca_etiquetas(numero, troca):
+    cab = _titulo_com_barra(numero, NOMES_SECOES["troca_etiquetas"])
+    antigas = _fotos_validas(troca.get("etiquetas_antigas"))
+    novas = _fotos_validas(troca.get("etiquetas_novas"))
+    micros = _fotos_validas(troca.get("fotos_microinversor_novo"))
+    elementos = []
+
+    if not (antigas or novas or micros):
+        cab += [Paragraph("Nenhuma foto registrada nesta seção.", CORPO),
+                Spacer(1, 0.4 * cm)]
+        return [KeepTogether(cab)]
+    if antigas or novas:
+        # sem texto preto acima dos cards: o título interno de cada card basta
+        itens = []   # antiga e nova alternadas => ficam lado a lado
+        for i in range(max(len(antigas), len(novas))):
+            if i < len(antigas):
+                itens.append((antigas[i], ROTULO_ETIQUETA_ANTIGA))
+            if i < len(novas):
+                itens.append((novas[i], ROTULO_ETIQUETA_NOVA))
+        elementos += _grupo_cards(cab, itens)
+        cab = []
+    if micros:
+        # sem subtítulo em texto preto: só o título interno verde do card
+        elementos += _grupo_cards(cab, [(f, ROTULO_MICRO_NOVO) for f in micros])
+    elementos.append(Spacer(1, 0.2 * cm))
+    return elementos
+
+
+def _celula_status(status, medido=True):
+    """Pílula CONFORME / NÃO CONFORME (traço quando não há medição)."""
+    if not medido:
+        return Paragraph("—", CORPO_TABELA)
+    conforme = (status or "CONFORME").upper() == "CONFORME"
+    return _Pilula("CONFORME" if conforme else "NÃO CONFORME", conforme)
+
+
+def _bloco_troca_modulos(numero, troca):
+    """Fotos ACIMA da tabela. Cada foto leva no topo (cabeçalho azul) o rótulo
+    exato da entrada ('MÓDULO 1', 'MÓDULO 2 + 3'...)."""
+    titulo = _titulo_com_barra(numero, NOMES_SECOES["troca_modulos"])
+    modulos = troca.get("modulos") or []
+
+    itens = [({"foto_path": m["foto_path"], "legenda": ""},
+              ((m.get("rotulo") or "Módulo").upper(), COR_ACCENT))
+             for m in modulos if m.get("foto_path")]
+
+    medicoes = [Paragraph(
+        "Medições de tensão e corrente realizadas em cada entrada do microinversor:",
+        CORPO), Spacer(1, 0.25 * cm)]
+    if modulos:
+        linhas = [[Paragraph("ENTRADA / MÓDULO(S)", CAB_TABELA),
+                   Paragraph("TENSÃO (V)", CAB_TABELA),
+                   Paragraph("CORRENTE (A)", CAB_TABELA),
+                   Paragraph("STATUS DE CONFORMIDADE", CAB_TABELA)]]
+        for m in modulos:
+            medido = m.get("tensao") is not None or m.get("corrente") is not None
+            linhas.append([
+                Paragraph(_esc(m.get("rotulo") or ""), ITEM_TABELA),
+                Paragraph(_fmt_medicao(m.get("tensao"), "V"), CORPO_TABELA),
+                Paragraph(_fmt_medicao(m.get("corrente"), "A"), CORPO_TABELA),
+                _celula_status(m.get("status"), medido),
+            ])
+        tabela = _tabela_base(linhas, [4.8 * cm, 3.8 * cm, 3.8 * cm, 5.6 * cm])
+        tabela.repeatRows = 1
+        medicoes.append(tabela)
+    else:
+        medicoes.append(Paragraph("Nenhuma medição registrada.", CORPO))
+
+    if itens:
+        elementos = _grupo_cards(titulo, itens) + [KeepTogether(medicoes)]
+    else:
+        elementos = [KeepTogether(titulo + medicoes)]
+    elementos.append(Spacer(1, 0.3 * cm))
+    return elementos
+
+
+def _bloco_troca_cabo_tronco(numero, troca):
+    """Só as fotos (cabeçalho azul 'TESTE DE TENSÃO CA - CABO TRONCO') e,
+    logo abaixo delas, a tabela de medições — sem subtítulo em texto preto."""
+    titulo = _titulo_com_barra(numero, NOMES_SECOES["troca_cabo_tronco"])
+    tronco = troca.get("cabo_tronco") or {}
+
+    fotos = [{"foto_path": tronco[k], "legenda": ""}
+             for k in ("foto_ff", "foto_ft") if tronco.get(k)]
+    itens = [(f, ROTULO_TESTE_TRONCO) for f in fotos]
+
+    linhas = [[Paragraph("PARÂMETRO AVALIADO", CAB_TABELA),
+               Paragraph("MEDIÇÃO OBTIDA", CAB_TABELA),
+               Paragraph("STATUS DE CONFORMIDADE", CAB_TABELA)]]
+    for nome, chave in (("Tensão Fase-Fase", "ff"), ("Tensão Fase-Terra", "ft")):
+        valor = tronco.get(f"tensao_{chave}")
+        texto_valor = _fmt_medicao(valor, "V")
+        linhas.append([Paragraph(nome, ITEM_TABELA),
+                       Paragraph(texto_valor, CORPO_TABELA),
+                       _celula_status(tronco.get(f"status_{chave}"), texto_valor != "—")])
+    tabela = _tabela_base(linhas, [6.4 * cm, 5.8 * cm, 5.8 * cm])
+    tabela.repeatRows = 1
+    medicoes = [Paragraph(
+        "Tensões medidas no conector do cabo tronco após a instalação:", CORPO),
+        Spacer(1, 0.25 * cm), tabela]
+
+    if itens:
+        elementos = _grupo_cards(titulo, itens) + [KeepTogether(medicoes)]
+    else:
+        elementos = [KeepTogether(titulo + medicoes)]
+    elementos.append(Spacer(1, 0.3 * cm))
+    return elementos
+
+
+def _bloco_troca_sugestoes(numero, sugestoes):
+    """Mesmo padrão do relatório de limpeza: sugestão com foto vira card de foto
+    (legenda = texto); sugestão só de texto sai no card de nota."""
+    sugestoes = [sg for sg in (sugestoes or [])
+                 if (sg.get("legenda") or "").strip() or sg.get("foto_path")]
+    if not sugestoes:
+        cab = _titulo_com_barra(numero, NOMES_SECOES["troca_sugestoes"])
+        return [KeepTogether(cab + [_card_nota_texto("Nenhuma sugestão registrada.",
+                                                     LARGURA_UTIL)]),
+                Spacer(1, 0.4 * cm)]
+    return _bloco_fotos("troca_sugestoes", numero, sugestoes)
+
+
+def _titulo_ocorrencia(oc):
+    return ((oc or {}).get("titulo") or "").strip() or "Ocorrência Extra"
+
+
+def _bloco_troca_ocorrencia(numero, oc):
+    """Só é chamado quando a Ocorrência Extra foi preenchida. O título digitado
+    pelo usuário substitui o título genérico da seção (barra azul numerada)."""
+    cab = _titulo_com_barra(numero, _titulo_ocorrencia(oc))
+    desc = (oc.get("descricao") or "").strip()
+    if desc:
+        cab.append(_card_nota_texto(_esc(desc).replace("\n", "<br/>"), LARGURA_UTIL))
+        cab.append(Spacer(1, 0.25 * cm))
+    fotos = _fotos_validas(oc.get("fotos"))
+    elementos = (_grupo_cards(cab, [(f, ROTULO_OCORRENCIA) for f in fotos])
+                 if fotos else [KeepTogether(cab)])
+    elementos.append(Spacer(1, 0.3 * cm))
+    return elementos
+
+
+def _ocorrencias_extras_validas(ocorrencias):
+    """Normaliza a lista `ocorrencias_extras` ([{titulo, descricao, fotos}], fotos
+    = [{foto_path, legenda}]): descarta as totalmente vazias (sem título, texto
+    nem foto válida) e dá título padrão 'Ocorrência Extra N' às sem título."""
+    validas = []
+    for oc in ocorrencias or []:
+        titulo = (oc.get("titulo") or "").strip()
+        descricao = (oc.get("descricao") or "").strip()
+        fotos = _fotos_validas(oc.get("fotos"))
+        if titulo or descricao or fotos:
+            validas.append({"titulo": titulo, "descricao": descricao, "fotos": fotos})
+    for i, oc in enumerate(validas, start=1):
+        oc["titulo"] = oc["titulo"] or f"Ocorrência Extra {i}"
+    return validas
+
+
+def _bloco_ocorrencias_extras(numero_inicial, ocorrencias):
+    """Uma seção numerada POR ocorrência: barra com o título personalizado,
+    descrição e galeria no grid adaptativo (1 centralizada, 2 lado a lado,
+    3 = 2 + 1 centralizada, 4 = 2x2). `ocorrencias` já vem de
+    _ocorrencias_extras_validas()."""
+    elementos = []
+    for i, oc in enumerate(ocorrencias):
+        elementos += _bloco_troca_ocorrencia(numero_inicial + i, oc)
+    return elementos
+
+
+def gerar_relatorio_troca_pdf(caminho_pdf, empresa, cliente, relatorio, troca,
+                              secoes_ativas):
+    """PDF do Relatório de Troca de Microinversor (mesmo padrão visual).
+
+    `secoes_ativas`: chaves 'troca_*' NA ORDEM da tela e só as que estão com o
+    Switch ligado — o PDF imprime exatamente essas, nessa ordem (mais o
+    bloco Objetivo/Aplicação/Normas, como no relatório de limpeza). A
+    Ocorrência Extra, mesmo ativa, só sai se algo foi preenchido.
+
+    `troca` (fotos já como {"foto_path", "legenda"}):
+      etiquetas_antigas, etiquetas_novas, fotos_microinversor_novo: [foto]
+      modulos: [{"rotulo", "tensao", "corrente", "status"?, "foto_path"?}]
+      cabo_tronco: {"tensao_ff", "tensao_ft", "status_ff"?, "status_ft"?,
+                    "foto_ff"?, "foto_ft"?}      (status: CONFORME | NAO_CONFORME)
+                                         (foto_ff / foto_ft = caminho)
+      sugestoes: [{"legenda", "foto_path"?}]   (texto + foto opcional)
+      ocorrencias_extras: [{"titulo", "descricao", "fotos": [foto]}]
+        (formato antigo, uma única "ocorrencia": {...} | None, ainda é aceito)"""
+    pasta = os.path.dirname(caminho_pdf)
+    if pasta:
+        os.makedirs(pasta, exist_ok=True)
+
+    ocorrencias = _ocorrencias_extras_validas(
+        troca.get("ocorrencias_extras")
+        or ([troca["ocorrencia"]] if troca.get("ocorrencia") else []))
+    # A seção só entra se houver ocorrência preenchida; cada ocorrência vira
+    # uma seção numerada (e uma linha do sumário) com o título do usuário.
+    secoes = [sec for sec in secoes_ativas if sec != "troca_ocorrencia" or ocorrencias]
+    secoes_sumario, nomes_extra = [], {}
+    for sec in secoes:
+        if sec == "troca_ocorrencia":
+            for i, oc in enumerate(ocorrencias):
+                chave = f"ocorrencia_extra:{i}"
+                secoes_sumario.append(chave)
+                nomes_extra[chave] = _esc(oc["titulo"])
+        else:
+            secoes_sumario.append(sec)
+
+    doc = _criar_documento(
+        caminho_pdf, empresa.get("logo_path"), relatorio["codigo"],
+        cliente.get("nome_razao_social", ""), relatorio.get("revisao"),
+        relatorio.get("data_servico"), empresa.get("nome", ""),
+    )
+    story = _bloco_capa(
+        empresa, cliente, relatorio,
+        titulo="Relatório de Troca de Microinversor",
+        subtitulo="Substituição de Equipamento, Testes dos Módulos e do Cabo Tronco",
+    )
+    story += _bloco_sumario(secoes_sumario, nomes_extra)
+    story += _bloco_objetivo(relatorio)
+
+    numero = 2
+    for secao in secoes:
+        if secao == "troca_etiquetas":
+            story += _bloco_troca_etiquetas(numero, troca)
+        elif secao == "troca_modulos":
+            story += _bloco_troca_modulos(numero, troca)
+        elif secao == "troca_cabo_tronco":
+            story += _bloco_troca_cabo_tronco(numero, troca)
+        elif secao == "troca_sugestoes":
+            story += _bloco_troca_sugestoes(numero, troca.get("sugestoes"))
+        elif secao == "troca_ocorrencia":
+            story += _bloco_ocorrencias_extras(numero, ocorrencias)
+            numero += len(ocorrencias) - 1   # +1 do fim do laço cobre a última
+        else:
+            continue
+        numero += 1
+
+    story += _bloco_assinatura(empresa, relatorio)
+    try:
+        doc.build(story, canvasmaker=NumberedCanvas)
+    finally:
+        limpar_cache_imagens()
     return caminho_pdf

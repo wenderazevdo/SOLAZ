@@ -3,7 +3,7 @@ e verificação de atualizações via GitHub Releases."""
 import threading
 
 import customtkinter as ctk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
 from config import Marca, APP_VERSION, GITHUB_REPO_OWNER, GITHUB_REPO_NAME
 from models.usuario_dao import UsuarioDAO
@@ -22,8 +22,18 @@ class ConfigView(ctk.CTkFrame):
         pasta_frame = ctk.CTkFrame(self, corner_radius=14)
         pasta_frame.pack(fill="x", padx=24, pady=(24, 12), anchor="n")
 
-        ctk.CTkLabel(pasta_frame, text="Configurações", font=ctk.CTkFont(size=18, weight="bold"),
-                     text_color=Marca.PRIMARIA).pack(anchor="w", padx=18, pady=(18, 10))
+        # Cabeçalho: título à esquerda e botão de logout em destaque à direita
+        # (na mesma linha, para não aumentar a altura da tela).
+        cabecalho = ctk.CTkFrame(pasta_frame, fg_color="transparent")
+        cabecalho.pack(fill="x", padx=18, pady=(18, 10))
+        ctk.CTkLabel(cabecalho, text="Configurações", font=ctk.CTkFont(size=18, weight="bold"),
+                     text_color=Marca.PRIMARIA).pack(side="left")
+        ctk.CTkButton(
+            cabecalho, text="🚪  Sair da Conta (Logout)", height=34,
+            font=ctk.CTkFont(size=13, weight="bold"), text_color="white",
+            fg_color=Marca.ERRO, hover_color=getattr(Marca, "ERRO_HOVER", "#B91C1C"),
+            command=self._sair_da_conta,
+        ).pack(side="right")
 
         ctk.CTkLabel(
             pasta_frame, text="Pasta Raiz Padrão dos Relatórios",
@@ -101,6 +111,17 @@ class ConfigView(ctk.CTkFrame):
             linha_update, text="", text_color="gray", font=ctk.CTkFont(size=11),
         )
         self.label_status_update.pack(side="left", padx=(12, 0))
+
+    # ----------------------------------------------------------- logout --
+    def _sair_da_conta(self):
+        """Pede confirmação e, se confirmado, pede à janela principal para
+        encerrar a sessão e voltar à tela de Login."""
+        janela = self.winfo_toplevel()
+        if not hasattr(janela, "fazer_logout"):
+            return
+        if messagebox.askyesno("Sair da conta", "Deseja realmente sair da sua conta?",
+                               parent=janela):
+            janela.fazer_logout()
 
     # ------------------------------------------------------------ pasta --
     def _alterar_pasta(self):

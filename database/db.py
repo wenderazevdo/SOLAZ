@@ -6,12 +6,25 @@ lógica de persistência desacoplada da interface e das regras de negócio
 (padrão Repository/DAO), facilitando uma futura migração para um banco de
 dados em nuvem (PostgreSQL/MySQL) bastando trocar esta camada.
 """
+import logging
 import os
+import re
 import sqlite3
 import sys
 from contextlib import contextmanager
+from datetime import date, datetime, timedelta
+from typing import Optional
 
 from config import DB_PATH
+
+_log = logging.getLogger(__name__)
+
+# Backup automático (ver rotina_backup_banco): um arquivo por dia em
+# data/backups/, mantendo só os últimos BACKUP_DIAS_RETENCAO dias.
+BACKUP_DIR = os.path.join(os.path.dirname(DB_PATH), "backups")
+BACKUP_PREFIXO = "sistema_backup"
+BACKUP_DIAS_RETENCAO = 7
+_TIMEOUT_CONEXAO = 30.0   # segundos esperando outro processo soltar o banco
 
 
 
@@ -52,9 +65,17 @@ def get_connection() -> sqlite3.Connection:
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=_TIMEOUT_CONEXAO)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        # WAL: leitores e escritor não se bloqueiam; NORMAL: fsync só nos
+        # checkpoints (rápido e seguro contra queda de energia em WAL).
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+    except sqlite3.DatabaseError:
+        # Ex.: pasta em rede/somente leitura sem suporte a WAL: segue no modo padrão.
+        _log.warning("Não foi possível ativar o modo WAL; usando o modo padrão.", exc_info=True)
     return conn
 
 
@@ -69,6 +90,65 @@ def get_cursor(commit: bool = False):
             conn.commit()
     finally:
         conn.close()
+
+
+def _limpar_backups_antigos(hoje: date):
+    """Apaga backups com mais de BACKUP_DIAS_RETENCAO dias (hoje + 6 anteriores
+    = 7 dias ficam). Só mexe em arquivos no padrão sistema_backup_AAAA-MM-DD.db."""
+    limite = hoje - timedelta(days=BACKUP_DIAS_RETENCAO)
+    padrao = re.compile(rf"{re.escape(BACKUP_PREFIXO)}_(\d{{4}}-\d{{2}}-\d{{2}})\.db")
+    for nome in os.listdir(BACKUP_DIR):
+        achado = padrao.fullmatch(nome)
+        if not achado:
+            continue
+        try:
+            data = datetime.strptime(achado.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if data <= limite:
+            try:
+                os.remove(os.path.join(BACKUP_DIR, nome))
+            except OSError:
+                _log.warning("Não foi possível apagar o backup antigo %s", nome, exc_info=True)
+
+
+def rotina_backup_banco() -> Optional[str]:
+    """Backup automático do banco via API nativa do SQLite (conn.backup), que
+    gera uma cópia consistente mesmo com o banco em uso/WAL.
+
+    Chame ANTES de init_db(). Se o banco ainda não existe (primeira execução),
+    não faz nada. Grava data/backups/sistema_backup_AAAA-MM-DD.db (um por dia;
+    rodar de novo no mesmo dia só atualiza o do dia) e mantém só os últimos 7
+    dias. Escreve num arquivo .tmp e só então troca o definitivo, então uma
+    falha no meio nunca estraga um backup bom. Nunca levanta exceção: se o
+    backup falhar, registra no log e o app abre normalmente.
+    Devolve o caminho do backup, ou None se não houve/falhou."""
+    if not os.path.isfile(DB_PATH):
+        return None
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        hoje = date.today()
+        destino = os.path.join(BACKUP_DIR, f"{BACKUP_PREFIXO}_{hoje:%Y-%m-%d}.db")
+        temporario = destino + ".tmp"
+        if os.path.exists(temporario):
+            os.remove(temporario)
+
+        origem = sqlite3.connect(DB_PATH, timeout=_TIMEOUT_CONEXAO)
+        try:
+            copia = sqlite3.connect(temporario)
+            try:
+                origem.backup(copia)
+            finally:
+                copia.close()
+        finally:
+            origem.close()
+
+        os.replace(temporario, destino)
+        _limpar_backups_antigos(hoje)
+        return destino
+    except Exception:
+        _log.exception("Falha ao fazer o backup automático do banco de dados")
+        return None
 
 
 def init_db():

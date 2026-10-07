@@ -14,7 +14,7 @@ DB_PATH = os.path.join(DATA_DIR, "sistema.db")
 # Diretório raiz onde os relatórios em PDF são salvos (pasta padrão do
 # usuário — sobreposta em tempo de execução por ConfiguracaoDAO caso o
 # usuário escolha outra em Configurações).
-# Estrutura: /Documentos/SOLAZ/[Empresa]/[Cliente]/Relatórios/[Codigo].pdf
+# Estrutura: /Documentos/SOLAZ/[Empresa]/[Cliente]/Relatórios/[Subpasta do tipo]/[Codigo].pdf
 #            /Documentos/SOLAZ/[Empresa]/Serviços Realizados/[Arquivo].pdf
 _DOCUMENTOS_DIR = os.path.join(os.path.expanduser("~"), "Documents")
 if not os.path.isdir(_DOCUMENTOS_DIR):
@@ -23,6 +23,12 @@ if not os.path.isdir(_DOCUMENTOS_DIR):
     _DOCUMENTOS_DIR = alternativa if os.path.isdir(alternativa) else _DOCUMENTOS_DIR
 RELATORIOS_DIR = os.path.join(_DOCUMENTOS_DIR, "SOLAZ")
 os.makedirs(RELATORIOS_DIR, exist_ok=True)
+
+# Nome da pasta de relatórios dentro da pasta do cliente e subpastas por tipo
+# de relatório (criadas automaticamente com os.makedirs(..., exist_ok=True)).
+PASTA_RELATORIOS_CLIENTE = "Relatórios"
+SUBPASTA_RELATORIO_LIMPEZA = "RELATORIO LIMPEZA"
+SUBPASTA_RELATORIO_TROCA = "RELATORIO TROCA MICRO"
 
 # Diretório de logos das empresas
 LOGOS_DIR = os.path.join(DATA_DIR, "logos")
@@ -48,7 +54,7 @@ COLOR_THEME = "blue"         # tema de cor do CustomTkinter (base do CTk)
 # Versão instalada e repositório do GitHub usado para checagem de
 # atualizações (Configurações → "Verificar Atualizações").
 # ---------------------------------------------------------------------------
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 GITHUB_REPO_OWNER = "wenderazevdo"
 GITHUB_REPO_NAME = "SOLAZ"
 

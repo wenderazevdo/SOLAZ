@@ -32,6 +32,24 @@ _MENSAGENS_ERRO = {
 }
 
 
+def _cancelar_afters_pendentes(janela):
+    """Cancela os `after()` ainda agendados (inclusive os do customtkinter)
+    antes do destroy(); senão eles disparam depois e o terminal mostra
+    'invalid command name ... ("after" script)'. Nunca levanta exceção."""
+    try:
+        ids = janela.tk.splitlist(janela.tk.call("after", "info"))
+    except Exception:
+        return
+    for after_id in ids:
+        try:
+            # Cancela direto no Tcl. NÃO usar janela.after_cancel(): ele apaga
+            # o comando Tcl na janela errada e, no destroy() do widget dono,
+            # dá "TclError: can't delete Tcl command".
+            janela.tk.call("after", "cancel", after_id)
+        except Exception:
+            pass
+
+
 class LoginWindow(ctk.CTk):
     def __init__(self, on_login_success):
         super().__init__()
@@ -175,6 +193,7 @@ class LoginWindow(ctk.CTk):
             )
             return
 
+        _cancelar_afters_pendentes(self)
         self.destroy()
         self.on_login_success(resultado.is_master)
 
