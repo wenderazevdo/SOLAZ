@@ -1,6 +1,7 @@
 """Módulo 5: Configurações — pasta padrão de relatórios, aparência, senha
 e verificação de atualizações via GitHub Releases."""
 import threading
+import time
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
@@ -8,7 +9,7 @@ from tkinter import filedialog, messagebox
 from config import Marca, APP_VERSION, GITHUB_REPO_OWNER, GITHUB_REPO_NAME
 from models.usuario_dao import UsuarioDAO
 from models.configuracao_dao import ConfiguracaoDAO
-from utils.github_updater import verificar_atualizacao, ErroVerificacaoAtualizacao
+from utils import auto_updater
 from ui.components import mostrar_alerta
 
 
@@ -112,6 +113,28 @@ class ConfigView(ctk.CTkFrame):
         )
         self.label_status_update.pack(side="left", padx=(12, 0))
 
+        # Atualização automática: ficam ocultos até serem necessários (na mesma
+        # linha, para a tela não crescer).
+        self._info_update = None
+        self._baixando = False
+        self._cancelar_evt = threading.Event()
+        self.btn_atualizar_agora = ctk.CTkButton(
+            linha_update, text="⬇  Baixar e Atualizar Agora", fg_color=Marca.SUCESSO_TEXTO,
+            hover_color=Marca.SUCESSO_TEXTO, font=ctk.CTkFont(weight="bold"),
+            command=self._baixar_e_atualizar,
+        )
+        self.barra_download = ctk.CTkProgressBar(linha_update, width=220)
+        self.barra_download.set(0)
+        self.label_progresso = ctk.CTkLabel(
+            linha_update, text="", text_color="gray", font=ctk.CTkFont(size=11), width=150,
+            anchor="w",
+        )
+        self.btn_cancelar_download = ctk.CTkButton(
+            linha_update, text="Cancelar", width=80, fg_color=Marca.ERRO,
+            hover_color=getattr(Marca, "ERRO_HOVER", "#B91C1C"),
+            command=self._cancelar_download,
+        )
+
     # ----------------------------------------------------------- logout --
     def _sair_da_conta(self):
         """Pede confirmação e, se confirmado, pede à janela principal para
@@ -164,53 +187,186 @@ class ConfigView(ctk.CTkFrame):
         self.label_pasta_atual.configure(text=self.config_dao.obter_pasta_relatorios())
 
     # -------------------------------------------------- atualizações --
+    def _ui(self, fn):
+        """Agenda `fn` na thread da interface (seguro mesmo se a tela já fechou)."""
+        try:
+            self.after(0, fn)
+        except Exception:
+            pass
+
     def _verificar_atualizacoes(self):
-        """Dispara a checagem em uma thread separada (requisição de rede
-        é bloqueante) e usa `.after(0, ...)` para aplicar o resultado na
-        UI de volta na thread principal do Tkinter, evitando travar a
-        janela enquanto espera a resposta do GitHub."""
+        """Consulta o GitHub em thread separada (rede é bloqueante) e devolve o
+        resultado à thread do Tkinter com `after`, sem travar a janela."""
         self.btn_verificar_update.configure(state="disabled", text="Verificando...")
         self.label_status_update.configure(text="")
+        self.btn_atualizar_agora.pack_forget()
+        self._info_update = None
 
         def worker():
             try:
-                resultado = verificar_atualizacao()
-                self.after(0, lambda: self._on_check_updates_sucesso(resultado))
-            except ErroVerificacaoAtualizacao as exc:
-                self.after(0, lambda: self._on_check_updates_erro(str(exc)))
+                info = auto_updater.verificar()
+            except auto_updater.ErroAtualizacao as exc:
+                msg = str(exc)
+                self._ui(lambda: self._on_check_updates_erro(msg))
             except Exception as exc:  # rede indisponível, timeout etc.
-                self.after(0, lambda: self._on_check_updates_erro(
-                    f"Não foi possível verificar atualizações agora ({exc})."
-                ))
+                msg = f"Não foi possível verificar atualizações agora ({exc})."
+                self._ui(lambda: self._on_check_updates_erro(msg))
+            else:
+                self._ui(lambda: self._on_check_updates_sucesso(info))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_check_updates_sucesso(self, resultado: dict):
+    def _on_check_updates_sucesso(self, info):
         self.btn_verificar_update.configure(state="normal", text="Verificar Atualizações")
-        if resultado["atualizado"]:
+        if not info.tem_nova:
             self.label_status_update.configure(
-                text=f"✅ Você já está na versão mais recente ({resultado['versao_instalada']}).",
+                text=f"✅ Você já está na versão mais recente ({info.versao_instalada}).",
                 text_color=Marca.SUCESSO_TEXTO,
             )
             mostrar_alerta(
                 self.winfo_toplevel(), "Sistema Atualizado",
-                f"Você já está usando a versão mais recente ({resultado['versao_instalada']}).",
+                f"Você já está usando a versão mais recente ({info.versao_instalada}).",
                 "sucesso",
             )
-        else:
-            self.label_status_update.configure(
-                text=f"⬆️ Nova versão disponível: {resultado['versao_remota']}",
-                text_color=Marca.ACCENT,
-            )
-            mensagem = (
-                f"Uma nova versão está disponível: {resultado['versao_remota']}\n"
-                f"(você está usando a {resultado['versao_instalada']}).\n\n"
-            )
-            if resultado.get("url"):
-                mensagem += f"Baixe em:\n{resultado['url']}"
-            mostrar_alerta(self.winfo_toplevel(), "Nova Versão Disponível", mensagem, "aviso")
+            return
+
+        self._info_update = info
+        self.label_status_update.configure(
+            text=f"⬆️ Nova versão disponível: {info.versao_remota}", text_color=Marca.ACCENT,
+        )
+        if info.asset_url and auto_updater.atualizacao_automatica_disponivel():
+            self.btn_atualizar_agora.pack(side="left", padx=(12, 0),
+                                          before=self.label_status_update)
+            return
+        # Sem arquivo na release, ou rodando do código-fonte: só informa o link.
+        mensagem = (
+            f"Uma nova versão está disponível: {info.versao_remota}\n"
+            f"(você está usando a {info.versao_instalada}).\n\n"
+        )
+        if info.url_pagina:
+            mensagem += f"Baixe em:\n{info.url_pagina}"
+        mostrar_alerta(self.winfo_toplevel(), "Nova Versão Disponível", mensagem, "aviso")
 
     def _on_check_updates_erro(self, mensagem_erro: str):
         self.btn_verificar_update.configure(state="normal", text="Verificar Atualizações")
         self.label_status_update.configure(text="⚠️ Falha ao verificar.", text_color=Marca.ERRO)
         mostrar_alerta(self.winfo_toplevel(), "Não foi possível verificar", mensagem_erro, "erro")
+
+    # ----------------------------------------------- baixar e atualizar --
+    def _modo_progresso(self, ativo: bool):
+        """Troca os controles da linha: [barra + % + Cancelar] <-> [botões normais]."""
+        if ativo:
+            self.btn_verificar_update.pack_forget()
+            self.label_status_update.pack_forget()
+            self.btn_atualizar_agora.pack_forget()
+            self.barra_download.set(0)
+            self.label_progresso.configure(text="Iniciando...")
+            self.barra_download.pack(side="left")
+            self.label_progresso.pack(side="left", padx=(10, 0))
+            self.btn_cancelar_download.configure(state="normal")
+            self.btn_cancelar_download.pack(side="left", padx=(10, 0))
+        else:
+            for w in (self.barra_download, self.label_progresso, self.btn_cancelar_download):
+                w.pack_forget()
+            self.btn_verificar_update.pack(side="left")
+            self.label_status_update.pack(side="left", padx=(12, 0))
+
+    def _baixar_e_atualizar(self):
+        info = self._info_update
+        if not info or self._baixando:
+            return
+        if not messagebox.askyesno(
+            "Atualizar agora",
+            f"Baixar a versão {info.versao_remota} e atualizar agora?\n\n"
+            "O programa será fechado e reaberto automaticamente.\n"
+            "Seus dados (clientes, empresas, relatórios e configurações) "
+            "não serão alterados.",
+            parent=self.winfo_toplevel(),
+        ):
+            return
+
+        self._baixando = True
+        self._cancelar_evt.clear()
+        self._modo_progresso(True)
+
+        def worker():
+            try:
+                auto_updater.fazer_backup_antes()
+                ultimo = [0.0]
+
+                def progresso(feito, total):
+                    agora = time.monotonic()
+                    if feito != total and agora - ultimo[0] < 0.1:
+                        return              # limita a ~10 atualizações/s
+                    ultimo[0] = agora
+                    self._ui(lambda: self._on_progresso(feito, total))
+
+                caminho = auto_updater.baixar(info, progresso=progresso,
+                                              cancelar=self._cancelar_evt)
+            except auto_updater.DownloadCancelado:
+                self._ui(self._on_download_cancelado)
+            except auto_updater.ErroAtualizacao as exc:
+                msg = str(exc)
+                self._ui(lambda: self._on_download_erro(msg))
+            except Exception as exc:
+                msg = f"Falha inesperada no download ({exc})."
+                self._ui(lambda: self._on_download_erro(msg))
+            else:
+                self._ui(lambda: self._on_download_ok(caminho))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _cancelar_download(self):
+        self._cancelar_evt.set()
+        self.btn_cancelar_download.configure(state="disabled")
+        self.label_progresso.configure(text="Cancelando...")
+
+    def _on_progresso(self, feito: int, total: int):
+        if not self._baixando:
+            return
+        mb = feito / (1024 * 1024)
+        if total:
+            self.barra_download.set(min(feito / total, 1.0))
+            self.label_progresso.configure(
+                text=f"{feito * 100 // total}%  ({mb:.1f} / {total / (1024 * 1024):.1f} MB)")
+        else:
+            self.label_progresso.configure(text=f"{mb:.1f} MB")
+
+    def _fim_download(self):
+        self._baixando = False
+        self._modo_progresso(False)
+
+    def _on_download_cancelado(self):
+        self._fim_download()
+        self.label_status_update.configure(text="Download cancelado.", text_color="gray")
+        if self._info_update:
+            self.btn_atualizar_agora.pack(side="left", padx=(12, 0),
+                                          before=self.label_status_update)
+
+    def _on_download_erro(self, mensagem: str):
+        self._fim_download()
+        self.label_status_update.configure(text="⚠️ Falha ao baixar.", text_color=Marca.ERRO)
+        if self._info_update:
+            self.btn_atualizar_agora.pack(side="left", padx=(12, 0),
+                                          before=self.label_status_update)
+        mostrar_alerta(self.winfo_toplevel(), "Não foi possível atualizar", mensagem, "erro")
+
+    def _on_download_ok(self, caminho: str):
+        self.label_progresso.configure(text="Aplicando atualização...")
+        self.barra_download.set(1)
+        try:
+            aplicado = auto_updater.aplicar(caminho, self._info_update)
+        except Exception as exc:
+            self._on_download_erro(f"Não foi possível iniciar a atualização ({exc}).")
+            return
+        if not aplicado:
+            # Modo teste (rodando do código-fonte): baixou e validou, não aplica.
+            self._fim_download()
+            mostrar_alerta(
+                self.winfo_toplevel(), "Download concluído (modo teste)",
+                f"Arquivo baixado e verificado em:\n{caminho}\n\n"
+                "A atualização só é aplicada quando o programa roda como .exe.", "sucesso",
+            )
+            return
+        # O .bat auxiliar já está esperando: fecha o programa para ele trocar o .exe.
+        self.winfo_toplevel().fechar_aplicacao()

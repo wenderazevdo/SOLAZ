@@ -184,6 +184,19 @@ class MainWindow(ctk.CTk):
             if animar:
                 self._agendar_revelar()
 
+    # ------------------------------------------------------------ encerrar --
+    def fechar_aplicacao(self):
+        """Fecha o programa exatamente como o X da janela (o main.py registra o
+        encerramento limpo em WM_DELETE_WINDOW). Usado pela atualização."""
+        try:
+            self.tk.call(self.wm_protocol("WM_DELETE_WINDOW"))
+        except Exception:
+            cancelar_afters_pendentes(self)
+            try:
+                self.quit()
+            finally:
+                self.destroy()
+
     # ------------------------------------------------------------ logout --
     def fazer_logout(self):
         """Encerra a sessão: descarta as telas (e os dados em memória que elas
