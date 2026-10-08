@@ -2,14 +2,43 @@
 Configurações globais da aplicação.
 """
 import os
+import shutil
 
 # Diretório base da aplicação (onde o executável/script está rodando)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Diretório do banco de dados SQLite
-DATA_DIR = os.path.join(BASE_DIR, "data")
+# Pasta de dados GRAVÁVEIS do usuário (banco, logs, logos, assinaturas, fotos,
+# backups). Fica em %LOCALAPPDATA%\SolazApp e NÃO ao lado do programa: em
+# C:\Program Files o Windows bloqueia a escrita (PermissionError). Para testes
+# dá para redirecionar com a variável de ambiente SOLAZ_DATA_DIR.
+_LOCALAPPDATA = os.getenv("LOCALAPPDATA") or os.path.join(
+    os.path.expanduser("~"), "AppData", "Local"
+)
+DATA_DIR = os.environ.get("SOLAZ_DATA_DIR") or os.path.join(_LOCALAPPDATA, "SolazApp")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "sistema.db")
+
+
+def _migrar_dados_antigos():
+    """Na primeira execução após a mudança, COPIA (nunca apaga) os dados da
+    pasta antiga (<programa>/data) para a nova, para ninguém perder o banco."""
+    antiga = os.path.join(BASE_DIR, "data")
+    if not os.path.isdir(antiga):
+        return
+    if os.path.normcase(os.path.abspath(antiga)) == os.path.normcase(os.path.abspath(DATA_DIR)):
+        return
+    if os.path.exists(DB_PATH):          # já existe banco novo: não mistura
+        return
+    try:
+        shutil.copytree(
+            antiga, DATA_DIR, dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("*.log*", "__pycache__", "telegram_log.txt"),
+        )
+    except Exception:
+        pass    # migração é "melhor esforço"; o logging ainda não existe neste ponto
+
+
+_migrar_dados_antigos()
 
 # Diretório raiz onde os relatórios em PDF são salvos (pasta padrão do
 # usuário — sobreposta em tempo de execução por ConfiguracaoDAO caso o
@@ -63,9 +92,16 @@ GITHUB_REPO_NAME = "SOLAZ"
 # PC). Os valores podem ser sobrescritos por variáveis de ambiente, para não
 # precisar editar o código ao trocar/rotacionar o token.
 # ---------------------------------------------------------------------------
-TELEGRAM_TOKEN = os.environ.get(
-    "SOLAZ_TELEGRAM_TOKEN", "8834142296:AAH1Jmz1koZpWru5Lr5KgbSit1goiFyP92s"
-)
+# O token NÃO fica mais neste arquivo (que vai para o Git). Ele vem de
+# segredos.py (local, ignorado pelo Git e embutido no .exe no build) ou da
+# variável de ambiente SOLAZ_TELEGRAM_TOKEN, que tem prioridade.
+try:
+    from segredos import TELEGRAM_TOKEN as _TOKEN_LOCAL
+except ImportError:
+    _TOKEN_LOCAL = ""
+# Sem token configurado, usa um valor-marcador: o app abre normalmente e só os
+# alertas do Telegram deixam de sair (a falha vai para o log, nunca trava a UI).
+TELEGRAM_TOKEN = os.environ.get("SOLAZ_TELEGRAM_TOKEN") or _TOKEN_LOCAL or "0:TOKEN_NAO_CONFIGURADO"
 TELEGRAM_CHAT_ID = os.environ.get("SOLAZ_TELEGRAM_CHAT_ID", "1768982003")
 
 # ---------------------------------------------------------------------------

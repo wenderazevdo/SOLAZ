@@ -7,7 +7,7 @@ tela de Login (com cadastro de conta e trava por HWID) -> ao autenticar com
 sucesso, abre a Janela Principal — em modo normal ou, se a conta for a Master
 (dev_master), com o Painel do Desenvolvedor liberado.
 
-Resiliência: todos os erros/avisos vão para data/solaz_app.log (com rotação) e
+Resiliência: todos os erros/avisos vão para solaz_app.log, em %LOCALAPPDATA%/SolazApp (com rotação) e
 qualquer erro não tratado — inclusive em botões/callbacks da interface — vira
 um aviso amigável em vez de fechar o programa abruptamente.
 """
@@ -16,6 +16,7 @@ import logging
 import os
 import socket
 import sys
+import tempfile
 import threading
 import traceback
 from logging.handlers import RotatingFileHandler
@@ -25,6 +26,8 @@ from config import DATA_DIR
 # ---------------------------------------------------------------------------
 # Logs globais
 # ---------------------------------------------------------------------------
+# DATA_DIR = %LOCALAPPDATA%\SolazApp (definido em config.py): pasta onde o usuário
+# sempre pode gravar, ao contrário de C:\Program Files.
 LOG_PATH = os.path.join(DATA_DIR, "solaz_app.log")
 _LOG_MAX_BYTES = 1_000_000     # ~1 MB por arquivo
 _LOG_BACKUPS = 3               # solaz_app.log.1 ... .3
@@ -33,12 +36,25 @@ _log = logging.getLogger("solaz")
 
 
 def _configurar_logging():
-    """Grava erros e avisos (WARNING ou mais) em data/solaz_app.log, com
-    rotação básica para o arquivo nunca crescer sem limite."""
-    os.makedirs(DATA_DIR, exist_ok=True)
-    handler = RotatingFileHandler(
-        LOG_PATH, maxBytes=_LOG_MAX_BYTES, backupCount=_LOG_BACKUPS, encoding="utf-8"
-    )
+    """Grava erros e avisos (WARNING ou mais) em solaz_app.log dentro de DATA_DIR
+    (%LOCALAPPDATA%\\SolazApp), com rotação básica para o arquivo nunca crescer
+    sem limite. Se por algum motivo essa pasta não for gravável, usa a pasta
+    temporária do Windows; e se nem isso der, segue sem arquivo de log. O app
+    NUNCA deixa de abrir por causa do log."""
+    global LOG_PATH
+    handler = None
+    for caminho in (LOG_PATH, os.path.join(tempfile.gettempdir(), "solaz_app.log")):
+        try:
+            os.makedirs(os.path.dirname(caminho), exist_ok=True)
+            handler = RotatingFileHandler(
+                caminho, maxBytes=_LOG_MAX_BYTES, backupCount=_LOG_BACKUPS, encoding="utf-8"
+            )
+            LOG_PATH = caminho          # a mensagem de erro mostra o caminho real
+            break
+        except OSError:
+            continue
+    if handler is None:
+        handler = logging.NullHandler()
     handler.setLevel(logging.WARNING)
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     raiz = logging.getLogger()

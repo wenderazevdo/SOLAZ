@@ -12,6 +12,8 @@ venv/
 *.db
 *.sqlite3
 .env
+# Token do bot do Telegram (o modelo segredos.example.py continua versionado):
+segredos.py
 # Criados em tempo de execução (config.py recria as pastas sozinho):
 # banco, logos, assinaturas e fotos dos clientes.
 data/
@@ -20,6 +22,10 @@ data/
 build/
 dist/
 *.spec
+# O .spec do build oficial fica versionado (inclui as bibliotecas do Supabase):
+!SolazApp.spec
+# Saída do Inno Setup (instaladores gerados):
+Output/
 
 # --- 4. Mídias e PDFs gerados em testes --------------------
 *.pdf
@@ -38,5 +44,8 @@ dist/
 
 # --- 5. Arquivos de diagnóstico ----------------------------
 telegram_log.txt
+*.log
+*.log.*
+login_prefs.json
 estrutura.txt
 ignorados.txt
