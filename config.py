@@ -54,7 +54,7 @@ COLOR_THEME = "blue"         # tema de cor do CustomTkinter (base do CTk)
 # Versão instalada e repositório do GitHub usado para checagem de
 # atualizações (Configurações → "Verificar Atualizações").
 # ---------------------------------------------------------------------------
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 GITHUB_REPO_OWNER = "wenderazevdo"
 GITHUB_REPO_NAME = "SOLAZ"
 
@@ -64,18 +64,30 @@ GITHUB_REPO_NAME = "SOLAZ"
 # precisar editar o código ao trocar/rotacionar o token.
 # ---------------------------------------------------------------------------
 TELEGRAM_TOKEN = os.environ.get(
-    "SOLAZ_TELEGRAM_TOKEN", "8834142296:AAGQ4NGAct4jv6k-7Kp94kaCTyL4c7H-k4o"
+    "SOLAZ_TELEGRAM_TOKEN", "8834142296:AAH1Jmz1koZpWru5Lr5KgbSit1goiFyP92s"
 )
 TELEGRAM_CHAT_ID = os.environ.get("SOLAZ_TELEGRAM_CHAT_ID", "1768982003")
 
 # ---------------------------------------------------------------------------
+# [LEGADO] Conta Master local. Substituída pela conta master do Supabase
+# (perfis.papel = 'master'). Estas constantes ficam só por compatibilidade
+# com scripts antigos (ex.: gerar_hash_master.py) e NÃO são usadas no login.
 # Conta Master de Desenvolvedor. Só o HASH da senha é guardado (nunca a senha).
 # Gere com:  python gerar_hash_master.py   e cole o resultado abaixo (ou na
 # variável de ambiente SOLAZ_MASTER_HASH). Enquanto estiver vazio, a conta
 # master fica DESATIVADA (ninguém consegue entrar como dev_master).
 # ---------------------------------------------------------------------------
 MASTER_USUARIO = "dev_master"
-MASTER_SENHA_HASH = os.environ.get("SOLAZ_MASTER_HASH", "fa5e528bf9455ef7e6729e5b33791c28$a09023c605a3b7f456add9ff9d2b12629090e9b517b66ac707f7fe180a6752f6")
+MASTER_SENHA_HASH = os.environ.get("SOLAZ_MASTER_HASH", "")
+
+# ---------------------------------------------------------------------------
+# Supabase (autenticação e aprovação de usuários na nuvem).
+# A chave 'publishable' é feita para ficar em apps cliente; a segurança real
+# vem das políticas RLS (database/supabase_setup.sql). NUNCA coloque aqui a
+# chave 'secret'/'service_role'.
+# ---------------------------------------------------------------------------
+SUPABASE_URL = os.environ.get("SOLAZ_SUPABASE_URL", "https://liqoojykuzhxxammsanh.supabase.co")
+SUPABASE_KEY = os.environ.get("SOLAZ_SUPABASE_KEY", "sb_publishable_2HEt8DqK_iltjVYNJhI0Ow_MnhKXjhM")
 
 # Proporção fixa exigida para as fotos nos relatórios (largura, altura)
 FOTO_ASPECT_RATIO = (4, 3)

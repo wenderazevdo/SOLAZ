@@ -213,6 +213,8 @@ _COLUNAS_NOVAS = {
         ("descricao_servico", "TEXT"),
         ("valor_orcamento", "REAL"),
     ],
+    # LEGADO: os usuários agora vivem no Supabase (tabela perfis). Esta
+    # migração fica só para bancos locais antigos não darem erro.
     "usuarios": [
         ("hwid_vinculado", "TEXT"),
         ("nome_pc", "TEXT"),
@@ -233,17 +235,3 @@ def _migrar_colunas_extras(conn: sqlite3.Connection):
         for nome_coluna, tipo_sql in colunas:
             if nome_coluna not in colunas_atuais:
                 conn.execute(f"ALTER TABLE {tabela} ADD COLUMN {nome_coluna} {tipo_sql}")
-
-
-def seed_default_user():
-    """Garante a conta padrão de fábrica ('solaz' / 'solaz123'). Roda em
-    toda inicialização (não só em banco novo) para que instalações já
-    existentes também ganhem a conta ao atualizar o sistema. A conta
-    Master de Desenvolvedor NÃO fica no banco — é validada só contra
-    config.MASTER_USUARIO/MASTER_SENHA_HASH (ver services/auth_service.py),
-    então o hash da senha mestra nunca fica gravado no arquivo .db."""
-    from models.usuario_dao import UsuarioDAO, STATUS_APROVADO
-
-    dao = UsuarioDAO()
-    if not dao.buscar_por_usuario("solaz"):
-        dao.criar_usuario("solaz", "solaz123", status=STATUS_APROVADO)

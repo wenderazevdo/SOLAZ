@@ -129,8 +129,9 @@ def _instalar_tratamento_de_erros():
 _configurar_logging()
 _instalar_tratamento_de_erros()
 
-from database.db import init_db, seed_default_user, rotina_backup_banco  # noqa: E402
+from database.db import init_db, rotina_backup_banco  # noqa: E402
 from services.telegram_service import bot, iniciar_bot_polling  # noqa: E402
+import services.auth_service as auth_service  # noqa: E402
 from ui.login_window import LoginWindow  # noqa: E402
 from ui.main_window import MainWindow, cancelar_afters_pendentes  # noqa: E402
 
@@ -178,6 +179,7 @@ def _encerrar(app):
         bot.stop_polling()
     except Exception:
         pass
+    auth_service.encerrar_sessao()   # sai do Supabase e limpa a sessão em memória
     cancelar_afters_pendentes(app)   # evita 'invalid command name' no terminal
     try:
         app.quit()
@@ -192,6 +194,7 @@ _login_atual = None          # LoginWindow em exibição (para garantir que fech
 def _solicitar_logout():
     global _logout_solicitado
     _logout_solicitado = True
+    auth_service.encerrar_sessao()   # logout também encerra a sessão na nuvem
 
 
 def abrir_janela_principal(is_master: bool = False):
@@ -222,7 +225,6 @@ def main():
     # levanta exceção: se falhar, só registra no log.
     rotina_backup_banco()
     init_db()
-    seed_default_user()
 
     # Daemon Thread: não bloqueia a UI nem impede o app de fechar, mesmo
     # sem internet (o polling reconecta sozinho quando a rede voltar).

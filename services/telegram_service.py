@@ -1,20 +1,25 @@
 """
 Envio de alertas via Telegram Bot API — novo cadastro pendente (com botões
-Aprovar/Reprovar), tentativa de uso em outro PC (cópia). Toda requisição roda em thread separada com timeout curto: se o PC
-estiver offline ou o Telegram fora do ar, a interface NUNCA trava — a
-mensagem simplesmente não sai (falha silenciosa).
+Aprovar/Reprovar), tentativa de uso em outro PC (cópia). Toda requisição roda
+em thread separada com timeout curto: se o PC estiver offline ou o Telegram
+fora do ar, a interface NUNCA trava — a mensagem simplesmente não sai
+(falha silenciosa).
+
+IMPORTANTE: o clique nos botões Aprovar/Reprovar NÃO é mais tratado aqui. As
+contas agora ficam no Supabase e só o master (ou o servidor) pode alterar o
+status, então o clique chega por webhook a uma Edge Function
+(supabase/functions/telegram-aprovacao/index.ts), que atualiza o perfil com
+permissão de servidor. Por isso o app não faz mais polling do bot.
 """
 import json
 import logging
 import os
 import threading
-import time
 
 import requests
 import telebot  # pip install pyTelegramBotAPI
 
 from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DATA_DIR
-from models.usuario_dao import UsuarioDAO, STATUS_APROVADO, STATUS_BLOQUEADO
 
 _log = logging.getLogger("telegram")
 _log.setLevel(logging.INFO)
@@ -33,9 +38,21 @@ if not _log.handlers:
     _con.setFormatter(_fmt)
     _log.addHandler(_con)
 _TIMEOUT_SEGUNDOS = 3
-_URL_ENVIO = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+_BASE_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+_URL_ENVIO = f"{_BASE_API}/sendMessage"
 
+# Mantido só por compatibilidade com main.py (bot.stop_polling() ao fechar).
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
+
+
+def _md(valor) -> str:
+    """Escapa caracteres especiais do Markdown (legado) do Telegram, para que
+    nomes como 'dev_master' ou e-mails não quebrem a mensagem."""
+    texto = str(valor) if valor not in (None, "") else "—"
+    for ch in ("_", "*", "`", "["):
+        texto = texto.replace(ch, "\\" + ch)
+    return texto
+
 
 def _enviar_em_thread(texto: str, teclado: dict = None):
     _log.info("Enviando alerta: %s", texto.splitlines()[0])
@@ -48,7 +65,7 @@ def _enviar_em_thread(texto: str, teclado: dict = None):
             r = requests.post(_URL_ENVIO, data=dados, timeout=_TIMEOUT_SEGUNDOS)
             if r.status_code != 200:
                 _log.warning("Telegram recusou (Markdown): %s %s", r.status_code, r.text)
-                # Ex.: '_' em nomes (dev_master) quebra o Markdown -> reenvia como texto puro.
+                # Último recurso: reenvia como texto puro.
                 dados.pop("parse_mode")
                 r = requests.post(_URL_ENVIO, data=dados, timeout=_TIMEOUT_SEGUNDOS)
                 if r.status_code != 200:
@@ -70,124 +87,73 @@ def testar_envio():
 
 def diagnosticar():
     """Mostra QUAL bot e QUAL chat estão configurados (rodar no terminal)."""
-    base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-    me = requests.get(f"{base}/getMe", timeout=10).json()
+    me = requests.get(f"{_BASE_API}/getMe", timeout=10).json()
     print("BOT:", me)
-    chat = requests.get(f"{base}/getChat", params={"chat_id": TELEGRAM_CHAT_ID},
+    chat = requests.get(f"{_BASE_API}/getChat", params={"chat_id": TELEGRAM_CHAT_ID},
                         timeout=10).json()
     print("CHAT_ID configurado:", TELEGRAM_CHAT_ID)
     print("CHAT destino:", chat)
+    print("WEBHOOK:", requests.get(f"{_BASE_API}/getWebhookInfo", timeout=10).json())
 
 
-@bot.message_handler(func=lambda m: True)
-def _responder_chat_id(message):
-    """Qualquer mensagem enviada ao bot devolve o chat_id correto."""
-    _log.info("Mensagem recebida do chat_id=%s", message.chat.id)
-    try:
-        bot.reply_to(message, f"Seu chat_id é: {message.chat.id}")
-    except Exception as e:
-        _log.error("Falha ao responder chat_id: %r", e)
-
-
-def notificar_novo_cadastro(usuario: str, nome_pc: str, win_user: str, hwid: str):
-    texto = (
-        "🆕 *NOVO CADASTRO SOLAZ APP*\n"
-        f"• *Usuário:* {usuario}\n"
-        f"• *Nome do PC:* {nome_pc}\n"
-        f"• *Usuário Win:* {win_user}\n"
-        f"• *HWID:* {hwid}\n"
-        f"• *Status:* Aguardando Aprovação"
+def configurar_webhook(url: str, secret: str):
+    """Liga o webhook do bot na Edge Function (rodar UMA vez, no terminal).
+    `secret` precisa ser igual ao segredo TELEGRAM_WEBHOOK_SECRET da função."""
+    r = requests.post(
+        f"{_BASE_API}/setWebhook",
+        data={"url": url, "secret_token": secret, "allowed_updates": json.dumps(["callback_query"]),
+              "drop_pending_updates": "true"},
+        timeout=15,
     )
+    print(r.status_code, r.text)
+
+
+def remover_webhook():
+    r = requests.post(f"{_BASE_API}/deleteWebhook", timeout=15)
+    print(r.status_code, r.text)
+
+
+def notificar_novo_cadastro(usuario: str, nome_pc: str, win_user: str, hwid: str,
+                            email: str = "", user_id: str = None):
+    """Avisa o dev de um cadastro pendente. Os botões carregam o UUID da conta
+    (callback_data tem limite de 64 bytes: 'cad_reprovar_' + 36 = 49)."""
+    linhas = [
+        "🆕 *NOVO CADASTRO SOLAZ APP*",
+        f"• *Usuário:* {_md(usuario)}",
+    ]
+    if email:
+        linhas.append(f"• *E-mail:* {_md(email)}")
+    linhas += [
+        f"• *Nome do PC:* {_md(nome_pc)}",
+        f"• *Usuário Win:* {_md(win_user)}",
+        f"• *HWID:* {_md(hwid)}",
+        "• *Status:* Aguardando Aprovação",
+    ]
     teclado = None
-    # callback_data tem limite de 64 bytes; usuários longos demais ficam sem botão.
-    if len(f"cad_reprovar_{usuario}".encode("utf-8")) <= 64:
+    if user_id:
         teclado = {"inline_keyboard": [[
-            {"text": "✅ Aprovar", "callback_data": f"cad_aprovar_{usuario}"},
-            {"text": "❌ Reprovar", "callback_data": f"cad_reprovar_{usuario}"},
+            {"text": "✅ Aprovar", "callback_data": f"cad_aprovar_{user_id}"},
+            {"text": "❌ Reprovar", "callback_data": f"cad_reprovar_{user_id}"},
         ]]}
-    _enviar_em_thread(texto, teclado)
+    _enviar_em_thread("\n".join(linhas), teclado)
 
 
 def alertar_uso_em_outro_pc(usuario: str, nome_pc_original: str, nome_pc_atual: str,
                              win_user_atual: str, hwid_atual: str):
     texto = (
         "🚨 *ALERTA DE SEGURANÇA: USO EM OUTRO PC DETECTADO!*\n"
-        f"• *Usuário Tentando Logar:* {usuario}\n"
-        f"• *PC Original Cadastrado:* {nome_pc_original}\n"
-        f"• *PC Atual Detectado:* {nome_pc_atual}\n"
-        f"• *Usuário Win Atual:* {win_user_atual}\n"
-        f"• *HWID Atual:* {hwid_atual}\n"
-        f"• *Ação Tomada:* Acesso bloqueado automaticamente pelo sistema."
+        f"• *Usuário Tentando Logar:* {_md(usuario)}\n"
+        f"• *PC Original Cadastrado:* {_md(nome_pc_original)}\n"
+        f"• *PC Atual Detectado:* {_md(nome_pc_atual)}\n"
+        f"• *Usuário Win Atual:* {_md(win_user_atual)}\n"
+        f"• *HWID Atual:* {_md(hwid_atual)}\n"
+        "• *Ação Tomada:* Acesso bloqueado automaticamente pelo sistema."
     )
     _enviar_em_thread(texto)
 
 
-_ACOES_CADASTRO = {
-    "aprovar": (STATUS_APROVADO, "✅", "APROVADO"),
-    "reprovar": (STATUS_BLOQUEADO, "❌", "REPROVADO (bloqueado)"),
-}
-
-
-@bot.callback_query_handler(func=lambda c: bool(c.data) and c.data.startswith("cad_"))
-def _callback_cadastro(call):
-    bot.answer_callback_query(call.id, text="Processando...")
-    _log.info("Clique recebido: %s", call.data)
-
-    chat_id = call.message.chat.id
-    message_id = call.message.message_id
-    try:
-        if str(chat_id) != str(TELEGRAM_CHAT_ID):
-            return
-        _, acao, usuario = call.data.split("_", 2)
-        status, icone, rotulo = _ACOES_CADASTRO[acao]
-
-        dao = UsuarioDAO()
-        registro = dao.buscar_por_usuario(usuario)
-        if registro:
-            dao.atualizar_status(registro["id"], status)
-            decisao = f"{icone} Acesso de '{usuario}' {rotulo}"
-        else:
-            decisao = f"⚠️ Usuário '{usuario}' não encontrado (já excluído?)"
-
-        # Mantém os dados originais e troca os botões pela decisão.
-        bot.edit_message_text(f"{call.message.text}\n\n{decisao}", chat_id, message_id)
-    except Exception:
-        _log.exception("Erro ao processar clique %s", call.data)
-        try:
-            bot.edit_message_text("⚠️ Erro ao processar a solicitação. Tente novamente.",
-                                  chat_id, message_id)
-        except Exception:
-            pass
-
-
-_polling_thread = None
-
-
 def iniciar_bot_polling():
-    """Inicia (uma única vez) o recebimento de cliques em thread daemon.
-    Chamar na inicialização do app. Falhas de rede são tratadas pelo
-    infinite_polling (reconecta sozinho) e nunca travam a interface."""
-    global _polling_thread
-    if _polling_thread and _polling_thread.is_alive():
-        return
-
-    _log.info("Iniciando polling do bot...")
-
-    def worker():
-        # infinite_polling só existe em versões recentes do pyTelegramBotAPI;
-        # em versões antigas usamos polling() dentro de um loop de reconexão.
-        if hasattr(bot, "infinite_polling"):
-            try:
-                bot.infinite_polling(timeout=10, long_polling_timeout=10, skip_pending=True)
-            except Exception as e:
-                _log.error("Polling do Telegram encerrou: %r", e)
-            return
-        while True:
-            try:
-                bot.polling(none_stop=True, timeout=10)
-            except Exception as e:
-                _log.error("Polling do Telegram caiu (reconectando em 5s): %r", e)
-            time.sleep(5)
-
-    _polling_thread = threading.Thread(target=worker, daemon=True)
-    _polling_thread.start()
+    """Mantida só para main.py continuar funcionando. O app NÃO faz mais
+    polling: com webhook ativo o Telegram recusa getUpdates, e o clique nos
+    botões é tratado pela Edge Function 'telegram-aprovacao'."""
+    _log.info("Aprovação pelo Telegram via webhook (Edge Function); sem polling no app.")

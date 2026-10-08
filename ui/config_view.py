@@ -10,6 +10,7 @@ from config import Marca, APP_VERSION, GITHUB_REPO_OWNER, GITHUB_REPO_NAME
 from models.usuario_dao import UsuarioDAO
 from models.configuracao_dao import ConfiguracaoDAO
 from utils import auto_updater
+from utils.async_ui import rodar_em_segundo_plano
 from ui.components import mostrar_alerta
 
 
@@ -184,7 +185,12 @@ class ConfigView(ctk.CTkFrame):
         self.entry_senha_nova.delete(0, "end")
 
     def ao_exibir(self):
-        self.label_pasta_atual.configure(text=self.config_dao.obter_pasta_relatorios())
+        # Leitura no banco fora da thread da interface: a tela abre na hora e o
+        # texto da pasta é atualizado assim que a consulta termina.
+        rodar_em_segundo_plano(
+            self, self.config_dao.obter_pasta_relatorios,
+            lambda pasta: self.label_pasta_atual.configure(text=pasta),
+        )
 
     # -------------------------------------------------- atualizações --
     def _ui(self, fn):

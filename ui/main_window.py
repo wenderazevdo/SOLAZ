@@ -3,7 +3,7 @@ entre módulos. Quando o login é feito com a conta Master (dev_master), a
 aba extra "Painel do Desenvolvedor" é liberada e vira a tela inicial."""
 import gc
 import os
-import tkinter as tk
+import sys
 
 import customtkinter as ctk
 from PIL import Image
@@ -11,7 +11,7 @@ from PIL import Image
 from config import APPEARANCE_MODE, COLOR_THEME, Marca, LOGO_SOLAZ_PATH
 from ui.empresas_view import EmpresasView
 from ui.clientes_view import ClientesView
-from ui.relatorio_view import RelatorioView, transicao_suave, fade_in_janela
+from ui.relatorio_view import RelatorioView
 from ui.agenda_view import AgendaView
 from ui.servicos_realizados_view import ServicosRealizadosView
 from ui.config_view import ConfigView
@@ -31,9 +31,9 @@ _MODULOS_BASE = [
 ]
 _MODULO_DEV = ("dev_panel", "Painel do Desenvolvedor", DevPanelView, "🛠️")
 
-# Transição entre telas: a tela nova é montada em memória sob uma cortina lisa
-# (cor do fundo) e só é revelada, com fade-in curto, quando está pronta.
-_CORTINA_MS = 40                   # tempo coberto para o Tk pintar a tela nova
+# Transição entre telas: as telas são criadas uma vez e apenas trocadas de lugar
+# (sem cortina nem fade de opacidade da janela, que causavam a "piscada").
+_ATRASO_AO_EXIBIR_MS = 15          # atualização dos dados só depois do 1º desenho da tela
 _PRE_CARREGAR_TELAS = True         # instancia as telas em segundo plano (sem exibir)
 _PRE_CARREGAR_INTERVALO_MS = 250   # uma tela por vez, para não travar a interface
 
@@ -84,10 +84,9 @@ class MainWindow(ctk.CTk):
 
         self._views_instanciadas = {}
         self._modulo_atual = None
-        self._cortina = None
-        self._revelar_job = None
+        self._job_ao_exibir = None
         self._pre_falhas = set()
-        self._mostrar_modulo("dev_panel" if is_master else "empresas", animar=False)
+        self._mostrar_modulo("dev_panel" if is_master else "empresas")
         if _PRE_CARREGAR_TELAS:
             self.after(400, self._pre_carregar_proxima)
 
@@ -151,38 +150,65 @@ class MainWindow(ctk.CTk):
 
     # ------------------------------------------------------------- troca --
     def _obter_view(self, chave):
+        """Cria a tela (uma única vez) e já carrega os dados dela FORA da tela
+        (ainda sem grid): quando for exibida, o conteúdo já está pronto."""
         if chave not in self._views_instanciadas:
             _, _, classe_view, _ = next(m for m in self._modulos if m[0] == chave)
-            self._views_instanciadas[chave] = classe_view(self.content_frame)
+            view = classe_view(self.content_frame)
+            self._views_instanciadas[chave] = view
+            if hasattr(view, "ao_exibir"):
+                try:
+                    view.ao_exibir()
+                except Exception:
+                    # Erro na carga inicial: avisa pelo tratador global, mas a tela abre.
+                    self.report_callback_exception(*sys.exc_info())
         return self._views_instanciadas[chave]
 
-    def _mostrar_modulo(self, chave, animar=True):
+    def _mostrar_modulo(self, chave):
+        """Troca de tela SEM recriar nada e sem efeitos na janela:
+          * as telas são criadas uma vez e reaproveitadas (ficam em memória);
+          * a nova é exibida (grid) ANTES de a antiga sair (grid_remove, que
+            guarda a posição), então a área nunca fica vazia nem pisca;
+          * nada de cortina, fade de opacidade da janela ou update_idletasks;
+          * a atualização dos dados (ao_exibir) roda logo DEPOIS de a tela
+            aparecer, para o clique responder na hora.
+        """
+        ja_existia = chave in self._views_instanciadas
+        view = self._obter_view(chave)
+
         for k, btn in self._botoes.items():
             btn.configure(fg_color=Marca.PRIMARIA_CLARA if k == chave else "transparent")
 
-        # Clique na tela que já está aberta: só atualiza, sem animação.
-        if chave == self._modulo_atual and chave in self._views_instanciadas:
-            view = self._views_instanciadas[chave]
-            if hasattr(view, "ao_exibir"):
-                with transicao_suave(self, fade=False):
-                    view.ao_exibir()
-            return
+        if chave != self._modulo_atual:
+            anterior = self._views_instanciadas.get(self._modulo_atual)
+            view.grid(row=0, column=0, sticky="nsew")
+            if anterior is not None and anterior is not view:
+                anterior.grid_remove()
+            self._modulo_atual = chave
 
-        if animar:
-            self._erguer_cortina()
-        try:
-            # fade=False: o fade-in só começa quando a cortina sai (_revelar)
-            with transicao_suave(self, fade=False):
-                for widget in self.content_frame.winfo_children():
-                    widget.grid_forget()
-                view = self._obter_view(chave)
-                view.grid(row=0, column=0, sticky="nsew")
-                self._modulo_atual = chave
-                if hasattr(view, "ao_exibir"):
-                    view.ao_exibir()
-        finally:
-            if animar:
-                self._agendar_revelar()
+        # Tela recém-criada já carregou os dados em _obter_view; as demais
+        # (reabertas ou clique na tela atual) só atualizam.
+        if ja_existia:
+            self._agendar_ao_exibir(view)
+
+    def _agendar_ao_exibir(self, view):
+        """Atualiza os dados da tela depois do primeiro desenho. Cliques
+        rápidos em sequência cancelam atualizações que já não interessam."""
+        if not hasattr(view, "ao_exibir"):
+            return
+        if self._job_ao_exibir:
+            try:
+                self.after_cancel(self._job_ao_exibir)
+            except Exception:
+                pass
+            self._job_ao_exibir = None
+
+        def rodar():
+            self._job_ao_exibir = None
+            if self._views_instanciadas.get(self._modulo_atual) is view:
+                view.ao_exibir()
+
+        self._job_ao_exibir = self.after(_ATRASO_AO_EXIBIR_MS, rodar)
 
     # ------------------------------------------------------------ encerrar --
     def fechar_aplicacao(self):
@@ -204,9 +230,9 @@ class MainWindow(ctk.CTk):
         A próxima MainWindow nasce do zero — sem herdar nada, nem o perfil
         Master/Comum desta sessão."""
         try:
-            if self._revelar_job:
-                self.after_cancel(self._revelar_job)
-                self._revelar_job = None
+            if self._job_ao_exibir:
+                self.after_cancel(self._job_ao_exibir)
+                self._job_ao_exibir = None
         except Exception:
             pass
         self._views_instanciadas.clear()
@@ -236,42 +262,7 @@ class MainWindow(ctk.CTk):
         if callback:
             callback()
 
-    # ---------------------------------------------- cortina / pré-carga --
-    def _erguer_cortina(self):
-        try:
-            if self._revelar_job:
-                self.after_cancel(self._revelar_job)
-                self._revelar_job = None
-            if self._cortina is None or not self._cortina.winfo_exists():
-                self._cortina = tk.Frame(self, bd=0, highlightthickness=0)
-            try:
-                cor = self.cget("bg")
-            except Exception:
-                cor = "#EBEBEB"
-            self._cortina.configure(bg=cor)
-            self._cortina.place(in_=self.content_frame, x=0, y=0, relwidth=1, relheight=1)
-            self._cortina.lift()
-            self.update_idletasks()      # a cortina aparece ANTES de mexer nas telas
-        except Exception:
-            pass
-
-    def _agendar_revelar(self):
-        try:
-            if self._revelar_job:
-                self.after_cancel(self._revelar_job)
-            self._revelar_job = self.after(_CORTINA_MS, self._revelar)
-        except Exception:
-            self._revelar()
-
-    def _revelar(self):
-        self._revelar_job = None
-        try:
-            if self._cortina is not None:
-                self._cortina.place_forget()
-            fade_in_janela(self)
-        except Exception:                # janela fechada antes da hora
-            pass
-
+    # ---------------------------------------------------------- pré-carga --
     def _pre_carregar_proxima(self):
         """Instancia (sem exibir) uma tela ainda não criada, uma por vez, para o
         primeiro clique em cada módulo não precisar construir a interface."""

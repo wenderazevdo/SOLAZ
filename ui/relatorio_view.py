@@ -168,8 +168,17 @@ _CORTINA_MS = 50            # tempo mínimo coberto (cobre o restaurar da rolage
 _CORTINA_COM_FADE = False   # True = ao descobrir, também faz o fade-in da janela
 
 
+# O fade mexe na opacidade da JANELA INTEIRA (-alpha). No Windows isso faz a
+# janela inteira "piscar" a cada troca de tela/aba, então fica desligado.
+# Com False, fade_in_janela e transicao_suave deixam de mexer na opacidade.
+_FADE_JANELA_ATIVO = False
+
+
 def _alpha_suportado(janela):
-    """False em sistemas/gerenciadores sem suporte a '-alpha' (sem fade)."""
+    """False em sistemas/gerenciadores sem suporte a '-alpha' (sem fade) ou
+    com o fade desligado em _FADE_JANELA_ATIVO."""
+    if not _FADE_JANELA_ATIVO:
+        return False
     try:
         janela.attributes("-alpha")
         return True

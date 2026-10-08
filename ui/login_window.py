@@ -8,12 +8,15 @@ destaque na cor primária da marca e, no canto inferior direito, o botão
 flat "Criar nova conta". Toda a regra de negócio (status, HWID, conta
 Master) vive em services/auth_service.py — esta tela só chama e exibe.
 """
+import json
+import logging
 import os
+import threading
 
 import customtkinter as ctk
-from PIL import Image
+from PIL import Image, ImageDraw
 
-from config import Marca, LOGO_SOLAZ_PATH, ASSETS_DIR
+from config import Marca, LOGO_SOLAZ_PATH, ASSETS_DIR, DATA_DIR
 import services.auth_service as auth_service
 from services.security_service import pre_carregar_hwid
 from ui.components import ModalWindow, mostrar_alerta
@@ -22,13 +25,103 @@ _PAINEL_LARGURA = 380
 _JANELA_LARGURA = 900
 _JANELA_ALTURA = 600
 
+_log = logging.getLogger(__name__)
+
+# Preferência "Lembrar meu usuário": guarda SÓ o nome de usuário (nunca a senha),
+# em arquivo local desta máquina.
+_PREFS_PATH = os.path.join(DATA_DIR, "login_prefs.json")
+
+
+def _carregar_usuario_salvo() -> str:
+    """Último usuário salvo pelo 'Lembrar meu usuário' ('' se não houver)."""
+    try:
+        with open(_PREFS_PATH, "r", encoding="utf-8") as f:
+            dados = json.load(f)
+        if dados.get("lembrar"):
+            return str(dados.get("usuario", ""))
+    except (OSError, ValueError, AttributeError):
+        pass
+    return ""
+
+
+def _salvar_preferencia_login(lembrar: bool, usuario: str):
+    """Grava o usuário se 'lembrar' estiver marcado; senão apaga o que havia."""
+    try:
+        with open(_PREFS_PATH, "w", encoding="utf-8") as f:
+            json.dump({"lembrar": bool(lembrar), "usuario": usuario if lembrar else ""}, f)
+    except OSError:
+        _log.warning("Não foi possível salvar a preferência de login.", exc_info=True)
+
+# ---------------------------------------------------------------------------
+# Botão "olhinho" dentro do campo de senha (mostrar/ocultar). O ícone é
+# desenhado em código com o Pillow: não depende de arquivo de imagem.
+# ---------------------------------------------------------------------------
+_COR_OLHO = "#64748B"
+
+
+def _icone_olho(aberto: bool, tamanho: int = 16) -> ctk.CTkImage:
+    """Olho (aberto=True) ou olho riscado (aberto=False)."""
+    esc = 8                                   # supersampling: bordas lisas
+    w = tamanho * esc
+    img = Image.new("RGBA", (w, w), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    esp = max(2, w // 11)
+    d.ellipse([w * 0.05, w * 0.25, w * 0.95, w * 0.75], outline=_COR_OLHO, width=esp)
+    c, r = w / 2, w * 0.13
+    d.ellipse([c - r, c - r, c + r, c + r], fill=_COR_OLHO)
+    if not aberto:
+        d.line([w * 0.17, w * 0.19, w * 0.83, w * 0.81], fill=_COR_OLHO, width=esp)
+    img = img.resize((tamanho * 3, tamanho * 3), Image.LANCZOS)
+    return ctk.CTkImage(light_image=img, dark_image=img, size=(tamanho, tamanho))
+
+
+def _definir_mascara(entry, mascara: str):
+    """Troca o 'show' do CTkEntry sem estragar o placeholder: se ele estiver
+    ativo, o CTkEntry guarda o 'show' para restaurar quando o usuário digitar."""
+    if getattr(entry, "_placeholder_text_active", False):
+        try:
+            entry._pre_placeholder_arguments["show"] = mascara
+            return
+        except (AttributeError, KeyError, TypeError):
+            pass
+    entry.configure(show=mascara)
+
+
+def _adicionar_botao_olho(entry):
+    """Põe um olhinho DENTRO do campo de senha (canto direito) que alterna
+    entre senha oculta (•) e visível."""
+    img_mostrar = _icone_olho(True)      # senha oculta  -> clique para mostrar
+    img_ocultar = _icone_olho(False)     # senha visível -> clique para ocultar
+    estado = {"visivel": False}
+
+    def alternar():
+        estado["visivel"] = not estado["visivel"]
+        _definir_mascara(entry, "" if estado["visivel"] else "•")
+        btn.configure(image=img_ocultar if estado["visivel"] else img_mostrar)
+        entry.focus_set()
+
+    altura = max(18, int(entry.cget("height")) - 8)
+    btn = ctk.CTkButton(
+        entry, text="", image=img_mostrar, width=30, height=altura, corner_radius=8,
+        fg_color="transparent", hover_color=("gray85", "gray28"), command=alternar,
+    )
+    btn.place(relx=1.0, x=-6, rely=0.5, anchor="e")
+    return btn
+
+
 _MENSAGENS_ERRO = {
-    auth_service.MOTIVO_CREDENCIAIS_INVALIDAS: "Usuário ou senha inválidos.",
+    auth_service.MOTIVO_CREDENCIAIS_INVALIDAS: "Usuário ou senha incorretos.",
     auth_service.MOTIVO_PENDENTE:
         "Cadastro aguardando liberação do desenvolvedor para este computador.",
     auth_service.MOTIVO_BLOQUEADO: "Este acesso está bloqueado. Fale com o administrador.",
     auth_service.MOTIVO_HWID_DIVERGENTE:
         "Este usuário já está vinculado a outro computador. Acesso bloqueado.",
+    auth_service.MOTIVO_EMAIL_NAO_CONFIRMADO:
+        "Confirme seu e-mail antes de entrar (veja sua caixa de entrada).",
+    auth_service.MOTIVO_ERRO_REDE:
+        "Falha de conexão com o servidor. Verifique sua internet.",
+    auth_service.MOTIVO_PERFIL_AUSENTE:
+        "Perfil não encontrado. Fale com o administrador.",
 }
 
 
@@ -56,6 +149,7 @@ class LoginWindow(ctk.CTk):
         # on_login_success(is_master: bool) — a janela principal decide se
         # abre o app normal ou o Painel do Desenvolvedor.
         self.on_login_success = on_login_success
+        self._autenticando = False
 
         # O HWID (WMI/PowerShell) pode levar 1-2s para responder; calcula em
         # segundo plano assim que a tela abre, para o login não travar.
@@ -129,7 +223,7 @@ class LoginWindow(ctk.CTk):
             font=ctk.CTkFont(size=22, weight="bold"), text_color=Marca.PRIMARIA,
         ).pack(anchor="w", pady=(0, 2))
         ctk.CTkLabel(
-            container, text="Entre com suas credenciais para acessar o sistema.",
+            container, text="Entre com seu usuário e senha para acessar o sistema.",
             font=ctk.CTkFont(size=12), text_color="gray",
         ).pack(anchor="w", pady=(0, 26))
 
@@ -148,7 +242,24 @@ class LoginWindow(ctk.CTk):
             placeholder_text="Digite sua senha",
         )
         self.entry_senha.pack(pady=(4, 6))
+        _adicionar_botao_olho(self.entry_senha)
         self.entry_senha.bind("<Return>", lambda e: self._tentar_login())
+
+        self.var_lembrar = ctk.BooleanVar(value=False)
+        self.check_lembrar = ctk.CTkCheckBox(
+            container, text="Lembrar meu usuário", variable=self.var_lembrar,
+            font=ctk.CTkFont(size=12), text_color=Marca.TEXTO_SECUNDARIO,
+            checkbox_width=18, checkbox_height=18, corner_radius=4,
+            fg_color=Marca.PRIMARIA, hover_color=Marca.PRIMARIA_CLARA,
+        )
+        self.check_lembrar.pack(anchor="w", pady=(0, 6))
+
+        # Preenche o último usuário salvo e já posiciona o cursor na senha.
+        salvo = _carregar_usuario_salvo()
+        if salvo:
+            self.entry_usuario.insert(0, salvo)
+            self.var_lembrar.set(True)
+            self.after(200, self.entry_senha.focus_set)
 
         self.label_erro = ctk.CTkLabel(container, text="", text_color=Marca.ERRO,
                                         font=ctk.CTkFont(size=11), wraplength=320,
@@ -172,7 +283,32 @@ class LoginWindow(ctk.CTk):
         ).place(relx=0.97, rely=0.96, anchor="se")
 
     # ------------------------------------------------------------ login --
+    def _executar_async(self, funcao, ao_concluir, intervalo_ms=80):
+        """Roda `funcao` numa thread (chamadas de rede) para a janela não
+        travar, e entrega o resultado na thread da interface por polling com
+        after() — o Tkinter não é thread-safe.
+        ao_concluir(resultado, erro): `erro` é None quando deu certo."""
+        caixa = {}
+
+        def trabalho():
+            try:
+                caixa["resultado"] = funcao()
+            except Exception as exc:          # noqa: BLE001
+                caixa["erro"] = exc
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+        def verificar():
+            if "resultado" in caixa or "erro" in caixa:
+                ao_concluir(caixa.get("resultado"), caixa.get("erro"))
+            else:
+                self.after(intervalo_ms, verificar)
+
+        self.after(intervalo_ms, verificar)
+
     def _tentar_login(self):
+        if self._autenticando:      # Enter pressionado de novo durante o login
+            return
         usuario = self.entry_usuario.get().strip()
         senha = self.entry_senha.get()
 
@@ -180,74 +316,99 @@ class LoginWindow(ctk.CTk):
             self.label_erro.configure(text="Preencha usuário e senha.")
             return
 
+        self._autenticando = True
+        self.label_erro.configure(text="")
         self.btn_entrar.configure(state="disabled", text="Entrando...")
-        self.update_idletasks()
-        try:
-            resultado = auth_service.autenticar(usuario, senha)
-        finally:
+
+        def concluir(resultado, erro):
+            self._autenticando = False
             self.btn_entrar.configure(state="normal", text="Entrar")
 
-        if not resultado.sucesso:
-            self.label_erro.configure(
-                text=_MENSAGENS_ERRO.get(resultado.motivo, "Não foi possível entrar.")
-            )
-            return
+            if erro is not None or resultado is None:
+                _log.error("Falha inesperada no login", exc_info=erro)
+                self.label_erro.configure(text="Falha inesperada ao entrar. Tente novamente.")
+                return
+            if not resultado.sucesso:
+                self.label_erro.configure(
+                    text=resultado.mensagem
+                    or _MENSAGENS_ERRO.get(resultado.motivo, "Não foi possível entrar.")
+                )
+                return
 
-        _cancelar_afters_pendentes(self)
-        self.destroy()
-        self.on_login_success(resultado.is_master)
+            _salvar_preferencia_login(self.var_lembrar.get(), usuario)
+            _cancelar_afters_pendentes(self)
+            self.destroy()
+            self.on_login_success(resultado.is_master)
+
+        self._executar_async(lambda: auth_service.autenticar(usuario, senha), concluir)
 
     # --------------------------------------------------------- cadastro --
     def _abrir_cadastro(self):
-        modal = ModalWindow(self, "Criar Nova Conta", width=440, height=360)
+        modal = ModalWindow(self, "Criar Nova Conta", width=440, height=590)
 
         ctk.CTkLabel(
             modal.body, text="A conta é vinculada a este computador e fica pendente\n"
                               "até a aprovação do desenvolvedor.",
             text_color="gray", font=ctk.CTkFont(size=11), justify="left",
-        ).pack(anchor="w", padx=20, pady=(16, 14))
+        ).pack(anchor="w", padx=20, pady=(16, 10))
 
-        ctk.CTkLabel(modal.body, text="Usuário", font=ctk.CTkFont(size=12)).pack(
-            anchor="w", padx=20
-        )
-        entry_usuario = ctk.CTkEntry(modal.body, width=380, corner_radius=10)
-        entry_usuario.pack(padx=20, pady=(4, 12))
+        def campo(rotulo, **kwargs):
+            ctk.CTkLabel(modal.body, text=rotulo, font=ctk.CTkFont(size=12)).pack(
+                anchor="w", padx=20
+            )
+            entry = ctk.CTkEntry(modal.body, width=380, corner_radius=10, **kwargs)
+            entry.pack(padx=20, pady=(4, 10))
+            if kwargs.get("show"):          # campos de senha ganham o olhinho
+                _adicionar_botao_olho(entry)
+            return entry
 
-        ctk.CTkLabel(modal.body, text="Senha", font=ctk.CTkFont(size=12)).pack(
-            anchor="w", padx=20
-        )
-        entry_senha = ctk.CTkEntry(modal.body, width=380, corner_radius=10, show="•")
-        entry_senha.pack(padx=20, pady=(4, 12))
-
-        ctk.CTkLabel(modal.body, text="Confirmar Senha", font=ctk.CTkFont(size=12)).pack(
-            anchor="w", padx=20
-        )
-        entry_confirmar = ctk.CTkEntry(modal.body, width=380, corner_radius=10, show="•")
-        entry_confirmar.pack(padx=20, pady=(4, 4))
+        entry_nome = campo("Nome")
+        entry_usuario = campo("Usuário (para entrar no sistema)",
+                              placeholder_text="ex.: joao.silva (sem espaços)")
+        entry_email = campo("E-mail")
+        entry_senha = campo("Senha", show="•")
+        entry_confirmar = campo("Confirmar Senha", show="•")
 
         label_erro_cadastro = ctk.CTkLabel(modal.body, text="", text_color=Marca.ERRO,
-                                            font=ctk.CTkFont(size=11), wraplength=380)
-        label_erro_cadastro.pack(anchor="w", padx=20, pady=(4, 0))
+                                            font=ctk.CTkFont(size=11), wraplength=380,
+                                            justify="left")
+        label_erro_cadastro.pack(anchor="w", padx=20, pady=(0, 0))
 
         def cadastrar():
+            nome = entry_nome.get().strip()
             usuario = entry_usuario.get().strip()
+            email = entry_email.get().strip()
             senha = entry_senha.get()
-            confirmar = entry_confirmar.get()
 
-            if senha != confirmar:
+            if senha != entry_confirmar.get():
                 label_erro_cadastro.configure(text="As senhas não conferem.")
                 return
 
-            resultado = auth_service.registrar_conta(usuario, senha)
-            if not resultado.sucesso:
-                label_erro_cadastro.configure(text=resultado.mensagem)
-                return
+            label_erro_cadastro.configure(text="")
+            btn.configure(state="disabled", text="Cadastrando...")
 
-            modal.destroy()
-            mostrar_alerta(self, "Cadastro Realizado", resultado.mensagem, "sucesso")
+            def concluir(resultado, erro):
+                if not modal.winfo_exists():     # usuário fechou o modal no meio
+                    return
+                btn.configure(state="normal", text="Cadastrar")
+                if erro is not None or resultado is None:
+                    _log.error("Falha inesperada no cadastro", exc_info=erro)
+                    label_erro_cadastro.configure(
+                        text="Falha inesperada ao cadastrar. Tente novamente.")
+                    return
+                if not resultado.sucesso:
+                    label_erro_cadastro.configure(text=resultado.mensagem)
+                    return
+                modal.destroy()
+                mostrar_alerta(self, "Cadastro Realizado", resultado.mensagem, "sucesso")
 
-        ctk.CTkButton(
+            self._executar_async(
+                lambda: auth_service.registrar_conta(nome, usuario, email, senha), concluir
+            )
+
+        btn = ctk.CTkButton(
             modal.body, text="Cadastrar", width=380, height=40, corner_radius=10,
             fg_color=Marca.PRIMARIA, hover_color=Marca.PRIMARIA_CLARA,
             command=cadastrar,
-        ).pack(padx=20, pady=(12, 16))
+        )
+        btn.pack(padx=20, pady=(8, 16))
