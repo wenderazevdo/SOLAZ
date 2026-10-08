@@ -150,6 +150,7 @@ from services.telegram_service import bot, iniciar_bot_polling  # noqa: E402
 import services.auth_service as auth_service  # noqa: E402
 from ui.login_window import LoginWindow  # noqa: E402
 from ui.main_window import MainWindow, cancelar_afters_pendentes  # noqa: E402
+from auto_update import verificar_e_perguntar  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +216,7 @@ def _solicitar_logout():
 
 def abrir_janela_principal(is_master: bool = False):
     app = MainWindow(is_master=is_master, on_logout=_solicitar_logout)
+    app.after(1000, lambda: verificar_e_perguntar(app, silencioso=True))
     app.protocol("WM_DELETE_WINDOW", lambda: _encerrar(app))
     app.mainloop()
     # Logout: garante que a janela de login antiga não fique viva (oculta),
